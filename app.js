@@ -449,7 +449,7 @@ function artistArtwork(a,initialClass='artist-search-photo'){
  const id=Number(a?.artist_id)||0;
  const url=artistAvatarUrl(a);
  if(!url)void ensureArtistPhoto(a);
- return url?`<img class="${initialClass}" data-artist-photo="${id}" src="${esc(url)}" alt="" loading="lazy" decoding="async">`:`<span class="artist-initial" data-artist-initial="${id}">${esc(a?.artist_name?.[0]||'A')}</span>`;
+ return url?`<img ${initialClass==='rail-artist-avatar'?'style="width:100%;height:100%;object-fit:cover;object-position:center;display:block;border-radius:inherit"':''} class="${initialClass}" data-artist-photo="${id}" src="${esc(url)}" alt="" loading="lazy" decoding="async">`:`<span class="artist-initial" data-artist-initial="${id}">${esc(a?.artist_name?.[0]||'A')}</span>`;
 }
 function updateArtistArtwork(a){
  if(!a)return;
@@ -458,6 +458,7 @@ function updateArtistArtwork(a){
  document.querySelectorAll(`[data-artist-photo-host="${id}"]`).forEach(host=>{
    let img=host.querySelector('img[data-artist-photo]');
    if(!img){img=document.createElement('img');img.className=host.classList.contains('library-artist-photo')?'artist-avatar-photo':'artist-search-photo';img.dataset.artistPhoto=String(id);img.alt='';img.loading='lazy';img.decoding='async';host.prepend(img);}
+   if(host.classList.contains('about-art')){img.className='rail-artist-avatar';Object.assign(img.style,{width:'100%',height:'100%',objectFit:'cover',objectPosition:'center',display:'block',borderRadius:'inherit'});}
    if(img.src!==url)img.src=url;
    host.querySelectorAll('[data-artist-initial]').forEach(el=>el.remove());
  });
@@ -1292,6 +1293,39 @@ async function refreshPodcastStudioMetrics(){
   }catch(e){console.warn('Could not refresh Podcast Studio analytics:',e);}
 }
 
+// Resolve creator analytics labels from a permission-scoped database directory.
+// The analytics stream rows contain user IDs, not public profile names.
+const topListenerLabelCache = new Map();
+let topListenerLabelRequest = null;
+function analyticsListenerName(uid){
+  const p=topListenerLabelCache.get(String(uid))||state.socialProfiles?.[String(uid)];
+  if(p?.profile_visibility && String(p.profile_visibility).trim().toLowerCase()!=='public')return 'Private listener';
+  return p?.display_name?.trim()||p?.username?.trim()||'Listener';
+}
+async function hydrateArtistTopListenerLabels(){
+  if(!state.user||!state.artist||!db)return;
+  const uid=String(state.user.id);
+  const artistId=Number(state.artist.artist_id);
+  const unresolved=[...new Set((state.artistTopListeners||[]).map(x=>String(x.uid)).filter(x=>x&&!topListenerLabelCache.has(x)))];
+  if(!unresolved.length)return;
+  if(topListenerLabelRequest){await topListenerLabelRequest;return;}
+  topListenerLabelRequest=(async()=>{
+    try{
+      const {data,error}=await db.rpc('soundwave_my_top_listener_labels',{p_user_ids:unresolved});
+      if(error){console.warn('Top listener directory unavailable:',error.message);return;}
+      for(const p of data||[]){
+        const key=String(p.user_id);
+        topListenerLabelCache.set(key,p);
+        if(String(p.profile_visibility||'').toLowerCase()==='public')state.socialProfiles[key]={...(state.socialProfiles[key]||{}),...p};
+      }
+      for(const key of unresolved)if(!topListenerLabelCache.has(key))topListenerLabelCache.set(key,{profile_visibility:'private'});
+      if(!state.user||String(state.user.id)!==uid||Number(state.artist?.artist_id)!==artistId)return;
+      state.artistTopListeners=(state.artistTopListeners||[]).map(x=>({...x,name:analyticsListenerName(x.uid)}));
+      if(['artist-dashboard','studio'].includes(state.page))render();
+    }catch(e){console.warn('Top listener directory lookup failed:',e);}
+  })();
+  try{await topListenerLabelRequest;}finally{topListenerLabelRequest=null;}
+}
 async function refreshStreamMetrics(){
   if(!state.user||!db)return;
   try{
@@ -1316,7 +1350,7 @@ async function refreshStreamMetrics(){
       // browser-local history here, otherwise desktop and mobile can disagree.
       if(serverRows!==null) state.artistThirtyDay=serverRows;
       const listeners=new Map();state.artistThirtyDay.forEach(r=>listeners.set(String(r.user_id),(listeners.get(String(r.user_id))||0)+1));
-      state.artistTopListeners=[...listeners.entries()].sort((a,b)=>b[1]-a[1]).slice(0,5).map(([uid,count])=>({uid,count,name:state.socialProfiles[uid]?.display_name||`Listener ${String(uid).slice(0,6)}`}));
+      state.artistTopListeners=[...listeners.entries()].sort((a,b)=>b[1]-a[1]).slice(0,5).map(([uid,count])=>({uid,count,name:analyticsListenerName(uid)}));void hydrateArtistTopListenerLabels();
       if(!ss.error)state.studioStats=Array.isArray(ss.data)?ss.data[0]:ss.data;
       if(!roy.error)state.royaltySummary=Array.isArray(roy.data)?roy.data[0]:roy.data;
     }
@@ -3381,7 +3415,7 @@ async function refreshCrossDeviceMetrics({renderIfNeeded=true}={}){
       if(rows){
         state.artistThirtyDay=rows;
         const listeners=new Map();rows.forEach(r=>listeners.set(String(r.user_id),(listeners.get(String(r.user_id))||0)+1));
-        state.artistTopListeners=[...listeners.entries()].sort((a,b)=>b[1]-a[1]).slice(0,5).map(([uid,count])=>({uid,count,name:state.socialProfiles[uid]?.display_name||`Listener ${String(uid).slice(0,6)}`}));
+        state.artistTopListeners=[...listeners.entries()].sort((a,b)=>b[1]-a[1]).slice(0,5).map(([uid,count])=>({uid,count,name:analyticsListenerName(uid)}));void hydrateArtistTopListenerLabels();
         changed=true;
       }
     }
@@ -3468,7 +3502,7 @@ function setupRealtime(){
  }
 }
 function setupPlaylistPresence(){if(!db||!state.user||state.page!=='playlists'||!state.selectedPlaylist){if(playlistPresenceChannel){db.removeChannel(playlistPresenceChannel);playlistPresenceChannel=null;}return;}const id=state.selectedPlaylist;if(playlistPresenceChannel)db.removeChannel(playlistPresenceChannel);playlistPresenceChannel=db.channel(`playlist-presence-${id}`,{config:{presence:{key:state.user.id}}});playlistPresenceChannel.on('presence',{event:'sync'},()=>{const pres=playlistPresenceChannel.presenceState();state.playlistPresence=Object.values(pres).flat().filter(Boolean).map(x=>({user_id:x.user_id,name:x.name||'Listener'}));const el=document.getElementById('playlist-presence');if(el)el.innerHTML=playlistPresenceHtml();}).subscribe(async status=>{if(status==='SUBSCRIBED')await playlistPresenceChannel.track({user_id:state.user.id,name:state.profile?.display_name||'Listener',at:new Date().toISOString()});});}
-async function loadCompetitionData(){if(!state.user)return;try{state.recentSearches=JSON.parse(localStorage.getItem(RECENT_SEARCH_KEY)||'[]').slice(0,6);}catch{state.recentSearches=[];}if(!state.songs.length){try{const cached=JSON.parse(localStorage.getItem('soundwave-song-cache-v1')||'{}');if(Array.isArray(cached.songs)&&cached.songs.length){state.songs=cached.songs;toast('You are viewing your recent SoundWave catalog offline.');}}catch{}}const now=Date.now(),since90=new Date(now-90*86400000).toISOString(),since30=new Date(now-30*86400000).toISOString();const hist=await db.from('listening_history').select('stream_id,user_id,song_id,stream_date,duration_played_seconds,completion_status').eq('user_id',state.user.id).gte('stream_date',since90).order('stream_date',{ascending:false}).limit(1500);state.insightHistory=hist.error?(state.history||[]):mergeStreamHistory(hist.data||[], readCachedHistory());state.listeningStats=computeListeningStats(state.insightHistory);const weekCut=now-7*86400000,counts=new Map();state.insightHistory.filter(r=>new Date(r.stream_date).getTime()>=weekCut).forEach(r=>counts.set(Number(r.song_id),(counts.get(Number(r.song_id))||0)+1));state.topWeekSongs=[...counts.entries()].sort((a,b)=>b[1]-a[1]).map(([id])=>songById(id)).filter(Boolean).slice(0,20);cacheSongMetadata();const friendIds=[...new Set(state.following.map(x=>x.followed_user_id).filter(Boolean))];state.friendActivity=[];state.friendNow=[];if(friendIds.length){const [fh,likes,pls,social]=await Promise.all([db.from('listening_history').select('user_id,song_id,stream_date').in('user_id',friendIds).order('stream_date',{ascending:false}).limit(40),db.from('saved_song').select('user_id,song_id,date_saved,liked_at').in('user_id',friendIds).limit(60),db.from('playlist').select('user_id,playlist_name,created_at,date_created').in('user_id',friendIds).eq('is_active',true).limit(40),db.from('user_follow').select('follower_user_id,followed_user_id,date_followed,created_at').in('follower_user_id',friendIds).limit(100)]);if(!fh.error)state.friendNow=(fh.data||[]).filter(r=>now-new Date(r.stream_date).getTime()<10*60*1000).map(r=>{const s=songById(r.song_id),p=state.socialProfiles[String(r.user_id)];return s?{user_id:r.user_id,song_id:r.song_id,name:p?.display_name||'A friend',song_title:s.song_title,artist_name:s.album?.artist?.artist_name||'SoundWave',at:r.stream_date}:null;}).filter(Boolean).filter((x,i,a)=>a.findIndex(y=>String(y.user_id)===String(x.user_id))===i);const events=[];if(!likes.error)(likes.data||[]).forEach(r=>{const s=songById(r.song_id),p=state.socialProfiles[String(r.user_id)];if(s)events.push({name:p?.display_name||'A friend',initial:(p?.display_name||'F')[0],text:`liked ${s.song_title}`,at:r.date_saved||r.liked_at||new Date().toISOString()});});if(!pls.error)(pls.data||[]).forEach(r=>{const p=state.socialProfiles[String(r.user_id)];events.push({name:p?.display_name||'A friend',initial:(p?.display_name||'F')[0],text:`created ${r.playlist_name||'a playlist'}`,at:r.created_at||r.date_created||new Date().toISOString()});});if(!social.error)(social.data||[]).forEach(r=>{const uid=r.follower_user_id||r.follower_id||r.user_id;if(!friendIds.some(x=>String(x)===String(uid)))return;const p=state.socialProfiles[String(uid)];events.push({name:p?.display_name||'A friend',initial:(p?.display_name||'F')[0],text:'followed someone new',at:r.date_followed||r.created_at||new Date().toISOString()});});state.friendActivity=events.sort((a,b)=>new Date(b.at)-new Date(a.at)).slice(0,20);}if(state.artist&&state.ownedSongs.length){const initialArtistRows=await fetchArtistServerStreams(ANALYTICS_WINDOW_DAYS);if(initialArtistRows!==null)state.artistThirtyDay=initialArtistRows;const counts2=new Map();state.artistThirtyDay.forEach(r=>counts2.set(String(r.user_id),(counts2.get(String(r.user_id))||0)+1));state.artistTopListeners=[...counts2.entries()].sort((a,b)=>b[1]-a[1]).slice(0,5).map(([uid,count])=>({uid,count,name:state.socialProfiles[uid]?.display_name||`Listener ${String(uid).slice(0,6)}`}));}
+async function loadCompetitionData(){if(!state.user)return;try{state.recentSearches=JSON.parse(localStorage.getItem(RECENT_SEARCH_KEY)||'[]').slice(0,6);}catch{state.recentSearches=[];}if(!state.songs.length){try{const cached=JSON.parse(localStorage.getItem('soundwave-song-cache-v1')||'{}');if(Array.isArray(cached.songs)&&cached.songs.length){state.songs=cached.songs;toast('You are viewing your recent SoundWave catalog offline.');}}catch{}}const now=Date.now(),since90=new Date(now-90*86400000).toISOString(),since30=new Date(now-30*86400000).toISOString();const hist=await db.from('listening_history').select('stream_id,user_id,song_id,stream_date,duration_played_seconds,completion_status').eq('user_id',state.user.id).gte('stream_date',since90).order('stream_date',{ascending:false}).limit(1500);state.insightHistory=hist.error?(state.history||[]):mergeStreamHistory(hist.data||[], readCachedHistory());state.listeningStats=computeListeningStats(state.insightHistory);const weekCut=now-7*86400000,counts=new Map();state.insightHistory.filter(r=>new Date(r.stream_date).getTime()>=weekCut).forEach(r=>counts.set(Number(r.song_id),(counts.get(Number(r.song_id))||0)+1));state.topWeekSongs=[...counts.entries()].sort((a,b)=>b[1]-a[1]).map(([id])=>songById(id)).filter(Boolean).slice(0,20);cacheSongMetadata();const friendIds=[...new Set(state.following.map(x=>x.followed_user_id).filter(Boolean))];state.friendActivity=[];state.friendNow=[];if(friendIds.length){const [fh,likes,pls,social]=await Promise.all([db.from('listening_history').select('user_id,song_id,stream_date').in('user_id',friendIds).order('stream_date',{ascending:false}).limit(40),db.from('saved_song').select('user_id,song_id,date_saved').in('user_id',friendIds).limit(60),db.from('playlist').select('user_id,playlist_name,date_created').in('user_id',friendIds).eq('is_active',true).limit(40),db.from('user_follow').select('follower_user_id,followed_user_id,date_followed').in('follower_user_id',friendIds).limit(100)]);if(!fh.error)state.friendNow=(fh.data||[]).filter(r=>now-new Date(r.stream_date).getTime()<10*60*1000).map(r=>{const s=songById(r.song_id),p=state.socialProfiles[String(r.user_id)];return s?{user_id:r.user_id,song_id:r.song_id,name:p?.display_name||'A friend',song_title:s.song_title,artist_name:s.album?.artist?.artist_name||'SoundWave',at:r.stream_date}:null;}).filter(Boolean).filter((x,i,a)=>a.findIndex(y=>String(y.user_id)===String(x.user_id))===i);const events=[];if(!likes.error)(likes.data||[]).forEach(r=>{const s=songById(r.song_id),p=state.socialProfiles[String(r.user_id)];if(s)events.push({name:p?.display_name||'A friend',initial:(p?.display_name||'F')[0],text:`liked ${s.song_title}`,at:r.date_saved||new Date().toISOString()});});if(!pls.error)(pls.data||[]).forEach(r=>{const p=state.socialProfiles[String(r.user_id)];events.push({name:p?.display_name||'A friend',initial:(p?.display_name||'F')[0],text:`created ${r.playlist_name||'a playlist'}`,at:r.date_created||new Date().toISOString()});});if(!social.error)(social.data||[]).forEach(r=>{const uid=r.follower_user_id||r.follower_id||r.user_id;if(!friendIds.some(x=>String(x)===String(uid)))return;const p=state.socialProfiles[String(uid)];events.push({name:p?.display_name||'A friend',initial:(p?.display_name||'F')[0],text:'followed someone new',at:r.date_followed||new Date().toISOString()});});state.friendActivity=events.sort((a,b)=>new Date(b.at)-new Date(a.at)).slice(0,20);}if(state.artist&&state.ownedSongs.length){const initialArtistRows=await fetchArtistServerStreams(ANALYTICS_WINDOW_DAYS);if(initialArtistRows!==null)state.artistThirtyDay=initialArtistRows;const counts2=new Map();state.artistThirtyDay.forEach(r=>counts2.set(String(r.user_id),(counts2.get(String(r.user_id))||0)+1));state.artistTopListeners=[...counts2.entries()].sort((a,b)=>b[1]-a[1]).slice(0,5).map(([uid,count])=>({uid,count,name:analyticsListenerName(uid)}));void hydrateArtistTopListenerLabels();}
 if(hasAdminAccess()){const initialAdminRows=await fetchAdminServerStreams(ANALYTICS_WINDOW_DAYS);if(initialAdminRows!==null)state.adminAnalyticsHistory=initialAdminRows;}else state.adminAnalyticsHistory=[];
 await refreshPodcastRecommendationSignals();state.competitionLoaded=true;}
 function showOnboarding(){
@@ -3673,12 +3707,14 @@ function railHtml() {
     return `${head}<div class="podcast-rail-feature"><div class="podcast-rail-art">${icon('mic')}<span class="podcast-rail-pulse"></span></div><span class="podcast-rail-kicker">NOW PLAYING · PODCAST</span><h3>${esc(p.title||'Podcast episode')}</h3><p>${esc(subtitle)}</p><div class="podcast-rail-meta"><span>${icon('headphones')} Listening now</span>${episode?.duration_seconds?`<span>${nice(episode.duration_seconds)}</span>`:''}</div></div><section class="podcast-rail-details"><span class="eyebrow">EPISODE DETAILS</span><h4>${esc(p.title||'Episode')}</h4><p>${esc(episode?.description||show?.description||'Listen to this episode and explore more from the show.')}</p>${show?`<button type="button" class="button secondary" data-open-show="${show.show_id}">View podcast ${icon('forward')}</button>`:''}</section><section class="podcast-rail-tip">${icon('headphones')}<span>Continue listening from the player below. Your queue and episode controls remain available.</span></section>`;
   }
   return `${head}<div class="now-card"><span class="now-art">${p.kind === 'podcast' ? `<span class="placeholder-art large">${icon('mic')}</span>` : albumArt(song, 'large')}</span><div class="now-title"><div><h3>${esc(p.title)}</h3><p class="muted">${artist ? `<a href="#/artist-detail/${artist.artist_id}" data-open-artist="${artist.artist_id}">${esc(p.artist)}</a>` : esc(p.artist)}</p></div>${song ? heartBtn(song.song_id) : ''}</div></div>
- ${full ? `<section class="rail-card about"><h4>About the artist</h4><span class="about-art" style="background:${grad(full.artist_id)}">${esc(full.artist_name?.[0] || 'A')}</span><strong>${esc(full.artist_name)}</strong><p>${esc(full.bio || full.country || 'SoundWave artist')}</p>${followBtn(full, 'sm')}</section>` : ''}
+ ${full ? `<section class="rail-card about"><h4>About the artist</h4><span class="about-art" data-artist-photo-host="${Number(full.artist_id)}" style="background:${grad(full.artist_id)};overflow:hidden;display:grid;place-items:center">${artistArtwork(full, 'rail-artist-avatar')}</span><strong>${esc(full.artist_name)}</strong><p>${esc(full.bio || full.country || 'SoundWave artist')}</p>${followBtn(full, 'sm')}</section>` : ''}
  ${next ? `<section class="rail-card"><div class="rail-card-head"><h4>Next in queue</h4><button type="button" class="text-link" data-rail-tab="queue">Open queue</button></div>${queueRow({ song: next, title: next.song_title, artist: next.album?.artist?.artist_name || 'SoundWave' }, p.pos + 1)}</section>` : ''}${friendNowHtml()}${friendActivityHtml()}`;
 }
 function refreshRail() {
   const el = document.getElementById('context-rail'); if (!el) return;
   el.innerHTML = railHtml(); bindRail();
+  const activeArtist=state.player?.kind==='song'?songById(state.player.id)?.album?.artist:null;
+  if(activeArtist){const a=state.artists.find(x=>Number(x.artist_id)===Number(activeArtist.artist_id));if(a){updateArtistArtwork(a);if(!artistAvatarUrl(a))void ensureArtistPhoto(a);}}
   $('#sw-queue')?.classList.toggle('active', state.railTab === 'queue' && !prefs.railHidden);
 }
 function bindRail() {
