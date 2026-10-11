@@ -940,6 +940,17 @@ function bindContent(root = document) {
   root.querySelectorAll('[data-open-artist]').forEach((b) => b.onclick = (e) => { e.preventDefault(); e.stopPropagation(); navigate('artist-detail', { selectedArtist: Number(b.dataset.openArtist) }); });
   // Bind follower rows directly on every render; do not depend on bubbling document clicks.
   root.querySelectorAll('[data-open-follower]').forEach((b) => b.onclick = (e) => { e.preventDefault(); e.stopPropagation(); void openFollowerPublicProfile(b.dataset.openFollower, b.dataset.followerName).catch(err => { console.warn('Follower navigation failed',err); toast('Could not open this profile. Please try again.', true); }); });
+  root.querySelectorAll('[data-unfollow-listener]').forEach(b=>b.onclick=e=>{
+    e.preventDefault();e.stopPropagation();
+    const uid=b.dataset.unfollowListener;
+    if(!uid||!state.user)return;
+    action(async()=>{
+      check(await db.from('user_follow').delete().eq('follower_user_id',state.user.id).eq('followed_user_id',uid));
+      state.following=(state.following||[]).filter(r=>String(r.followed_user_id)!==uid);
+      state.personFollowing?.delete(uid);
+      render();toast('Unfollowed');
+    });
+  });
   root.querySelectorAll('[data-open-album]').forEach((b) => b.onclick = (e) => { e.preventDefault(); e.stopPropagation(); navigate('album-detail', { selectedAlbum: Number(b.dataset.openAlbum) }); });
   root.querySelectorAll('[data-filter]').forEach((b) => b.onclick = () => { state.uiFilter = b.dataset.filter; render(); });
   root.querySelectorAll('[data-discover-filter]').forEach((b) => b.onclick = () => { state.discoverFilter = b.dataset.discoverFilter || 'all'; render(); });
@@ -2433,6 +2444,26 @@ function myFollowingCount() { return uniqueFollowIds('following').length; }
 const followingArtists = () => state.artists.filter((a) => isFollowing(a.artist_id) && !isOwnArtist(a));
 const followNav = () => (hasArtistAccess() ? 'followers' : 'liked-artists');
 const followLabel = () => (hasArtistAccess() ? 'Followers' : 'Following');
+// Names of accounts followed by the current user, retrieved by UUID rather than search text.
+let followingDirectoryPending=false;
+async function hydrateFollowingDirectory(){
+ if(!state.user || followingDirectoryPending)return;
+ const ids=uniqueFollowIds('following');
+ if(!ids.length)return;
+ followingDirectoryPending=true;
+ try{
+   const {data,error}=await db.rpc('soundwave_my_following_labels');
+   if(error){console.warn('Following directory unavailable; apply the included SQL migration',error.message);return;}
+   let changed=false;
+   for(const p of data||[]){
+     const key=String(p.user_id);
+     const existing=state.socialProfiles?.[key]||{};
+     state.socialProfiles={...(state.socialProfiles||{}),[key]:{...existing,...p}};
+     changed=true;
+   }
+   if(changed && ['followers','liked-artists'].includes(state.page))render();
+ }finally{followingDirectoryPending=false;}
+}
 const followerImageRequests = new Map();
 function followerAvatar(r,i=0){
  const key=String(r.id||'');
@@ -2465,28 +2496,30 @@ async function openFollowerPublicProfile(userId, displayName='') {
  const uid=String(userId||'').trim();
  if(!uid){toast('Follower account identifier is unavailable.',true);return;}
  if(uid===String(state.user?.id)){navigate('profile');return;}
- let person=(state.peopleResults||[]).find(p=>String(p.user_id)===uid);
- const known=state.socialProfiles?.[uid]||{};
- // The public directory requires a search term, so try both the public name
- // and username. Verify the UUID to avoid navigating to a different person.
- if(!person){
-   const terms=[known.username,known.display_name,displayName].map(v=>String(v||'').trim()).filter(v=>v.length>=2&&v.length<=80);
-   for(const term of [...new Set(terms)]){
-     const {data,error}=await db.rpc('soundwave_search_public_people',{p_query:term,p_limit:30});
-     if(error){console.warn('People lookup failed',error);toast('Could not load public profile. Check People Search access.',true);return;}
-     person=(data||[]).find(p=>String(p.user_id)===uid);
-     if(person)break;
-   }
+ const linked=(state.artists||[]).find(a=>String(a.user_id)===uid);
+ if(linked){navigate('artist-detail',{selectedArtist:Number(linked.artist_id)});return;}
+ let person=state.socialProfiles?.[uid]||state.ownFollowerNames?.[uid]||(state.peopleResults||[]).find(p=>String(p.user_id)===uid);
+ if(!person?.user_id || !person.display_name){
+   // A direct authenticated directory resolves accounts you follow by ID.
+   const {data,error}=await db.rpc('soundwave_my_following_labels');
+   if(error){console.warn('Following directory unavailable',error);toast('Profile directory is unavailable. Apply the included SQL.',true);return;}
+   for(const p of data||[])state.socialProfiles[String(p.user_id)]={...(state.socialProfiles[String(p.user_id)]||{}),...p};
+   person=state.socialProfiles?.[uid]||person;
  }
- if(!person){toast('This follower has no searchable public profile.',true);return;}
- state.socialProfiles[uid]={...known,...person};
+ if(!person?.user_id){toast('This account could not be found in your social connections.',true);return;}
+ // Profile view shows only public data; never silently navigate by an ambiguous name.
+ if(String(person.profile_visibility||'Public').toLowerCase()!=='public'){
+   toast('This account has a private profile.',true);return;
+ }
  navigate('person-detail',{selectedPerson:person});
  void loadPublicPersonPlaylists(uid);
 }
+
 function followers(){
  const isArtist=hasArtistAccess();
  const tab=state.page==='followers'?'followers':'following';
  if(!state.ownFollowerNamesLoaded)void hydrateOwnFollowerNames();
+ if(uniqueFollowIds('following').some(uid=>!state.socialProfiles?.[uid]?.display_name))void hydrateFollowingDirectory();
  const fans=followerRows();
  const followingIds=uniqueFollowIds('following');
  const byOwner=new Map((state.artists||[]).filter(a=>a.user_id).map(a=>[String(a.user_id),a]));
@@ -2497,7 +2530,7 @@ function followers(){
    if(a)return `<div class="social-row"><button type="button" class="social-link" data-open-artist="${a.artist_id}"><span class="member-avatar sw-social-avatar" data-artist-photo-host="${Number(a.artist_id)}" style="background:${grad(i)}">${artistArtwork(a,'sw-social-avatar-photo')}</span><span><strong>${esc(a.artist_name)}</strong><small>Artist${followerText(a.artist_id)?' · '+followerText(a.artist_id):''}</small></span></button>${followBtn(a,'sm')}</div>`;
    const p=state.socialProfiles?.[uid]||{};
    const name=p.display_name||p.username||`Listener ${uid.slice(0,6)}`;
-   return `<div class="social-row"><button type="button" class="social-link sw-follower-link" data-open-follower="${esc(uid)}" data-follower-name="${esc(name)}" aria-label="View ${esc(name)} profile">${followerAvatar({id:uid,name,photo:p.profile_photo_path||p.profile_photo_url},i)}<span><strong>${esc(name)}</strong><small>Listener</small></span></button></div>`;
+   return `<div class="social-row"><button type="button" class="social-link sw-follower-link" data-open-follower="${esc(uid)}" data-follower-name="${esc(name)}" aria-label="View ${esc(name)} profile">${followerAvatar({id:uid,name,photo:p.profile_photo_path||p.profile_photo_url},i)}<span><strong>${esc(name)}</strong><small>Listener</small></span></button><button type="button" class="button sm danger sw-listener-unfollow" data-unfollow-listener="${esc(uid)}" aria-label="Unfollow ${esc(name)}">− Unfollow</button></div>`;
  }).join(''):`<div class="empty">You are not following anyone yet. <button type="button" class="text-link" data-nav="artists">Discover artists</button></div>`;
  const chips=`<div class="home-chips"><button class="${tab==='followers'?'active':''}" data-nav="followers">Followers</button><button class="${tab==='following'?'active':''}" data-nav="liked-artists">Following</button><button data-nav="artists">Discover artists</button></div>`;
  const stats=`<div class="social-stats"><div><strong>${myFollowerCount()}</strong><span>Followers</span></div><div><strong>${myFollowingCount()}</strong><span>Following</span></div></div>`;
