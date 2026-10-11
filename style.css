@@ -5518,3 +5518,46 @@ body[data-page="artist-detail"] .artist-profile-hero{background-image:linear-gra
 .collab-row{min-width:0;align-items:center;gap:10px}
 .collab-row>div{min-width:0;overflow-wrap:anywhere}
 @media(max-width:700px){.home-chips{gap:6px}.home-chips button{max-width:100%;white-space:nowrap}.social-row .social-link{min-width:0;flex:1}.collab-row strong{overflow-wrap:anywhere}}
+
+/* SoundWave Admin > Moderation > Artists: separate names from metadata.
+   Append at the very END of your active style.css so older rules cannot override it. */
+.admin-panel[data-admin-panel="artists"] .entity-cell {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.admin-panel[data-admin-panel="artists"] .entity-cell > span:last-child {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 4px;
+  min-width: 0;
+}
+.admin-panel[data-admin-panel="artists"] .entity-cell > span:last-child > strong {
+  display: block;
+  max-width: 100%;
+  font-weight: 700;
+  line-height: 1.25;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.admin-panel[data-admin-panel="artists"] .entity-cell > span:last-child > small {
+  display: block;
+  max-width: 100%;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.35;
+  color: #c4b5fd;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.admin-panel[data-admin-panel="artists"] .entity-cell .member-avatar {
+  flex: 0 0 auto;
+}
+@media (max-width: 700px) {
+  .admin-panel[data-admin-panel="artists"] .entity-cell {gap: 10px;}
+  .admin-panel[data-admin-panel="artists"] .entity-cell > span:last-child > small {font-size: 11px;}
+}
