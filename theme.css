@@ -2707,3 +2707,217 @@ html[data-theme="light"] body.karaoke-mode .karaoke-panel.ksing.ksing.ksing.ksin
 html[data-theme="light"] body.karaoke-mode .karaoke-panel.ksing.ksing.ksing.ksing.ksing .karaoke-mode-switch button:not([aria-pressed="true"]){color:#1b1f3d}
 @media (max-width:700px){html body.karaoke-mode .karaoke-panel.ksing.ksing.ksing.ksing.ksing{min-height:calc(100dvh - 196px)!important;background:radial-gradient(ellipse 70% 40% at 50% 100%,rgba(242,166,90,.16),transparent 70%),linear-gradient(180deg,#252a52 0%,#1b1f3d 45%,#0e1021 100%)!important}html body.karaoke-mode .karaoke-panel.ksing.ksing.ksing.ksing.ksing .karaoke-heading{display:none!important}html body.karaoke-mode .karaoke-panel.ksing.ksing.ksing.ksing.ksing .karaoke-mode-bar{top:10px}html body.karaoke-mode .karaoke-panel.ksing.ksing.ksing.ksing.ksing .kstage{font-size:calc(clamp(24px,8vw,40px) * var(--lyrics-scale,1))!important}}
 @media (max-width:700px){html[data-theme="light"] body.karaoke-mode .karaoke-panel.ksing.ksing.ksing.ksing.ksing{background:radial-gradient(ellipse 70% 40% at 50% 100%,rgba(242,166,90,.22),transparent 70%),linear-gradient(180deg,#f8f9fc 0%,#ebecf5 55%,#e0e3f1 100%)!important}}
+
+/* ---- Release / show dialogs: layout fixes (v108) ---- */
+.release-create-dialog .release-dialog-head h2{letter-spacing:-.02em!important;word-spacing:.14em}
+.release-create-dialog .release-art-panel{align-self:start}
+.release-create-dialog .release-cover-drop{display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center}
+.release-create-dialog .release-cover-drop>span{flex:none!important;width:100%!important;max-width:260px!important;height:auto!important;aspect-ratio:1/1!important;margin:0 auto 6px;overflow:hidden}
+.release-create-dialog .release-cover-drop>span>svg{width:44%;height:auto;opacity:.7}
+.release-create-dialog .release-cover-drop>span img{display:block;width:100%!important;height:100%!important;aspect-ratio:1/1;object-fit:cover!important}
+.release-create-dialog .release-cover-drop small{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.release-create-dialog .release-cover-drop.has-cover{border-style:solid;border-color:rgba(242,166,90,.55)}
+.release-create-dialog label.single-field{position:relative}
+.release-create-dialog label.single-field>.field-optional{position:absolute;top:0;right:0;float:none}
+.release-create-dialog .field-help.availability:empty{display:none}
+.release-create-dialog .release-meta-panel textarea{min-height:92px;resize:vertical}
+.release-create-dialog .release-title-field{margin-bottom:14px}
+
+/* ---- Upload loading overlay inside dialogs (v108) ---- */
+.sw-dialog-busy{position:absolute;left:0;width:100%;z-index:60;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:24px;text-align:center;color:#fff;border-radius:inherit;background:rgba(14,16,33,.88);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);animation:swBusyIn .2s ease-out}
+.sw-dialog-busy .sw-upload-spin{width:48px;height:48px;border-width:4px;margin-bottom:6px}
+.sw-dialog-busy .sw-upload-title{font-size:clamp(18px,2.4vw,22px);font-weight:800}
+.sw-dialog-busy .sw-upload-sub{max-width:min(440px,100%);font-size:13px;color:rgba(255,255,255,.75);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sw-dialog-busy .sw-upload-bar{width:min(320px,80%);margin-top:6px}
+.sw-dialog-busy em{font-style:normal;font-size:12px;color:rgba(255,255,255,.6)}
+@keyframes swBusyIn{from{opacity:0}to{opacity:1}}
+html[data-theme="light"] .sw-dialog-busy{background:rgba(243,244,249,.9);color:#1b1f3d}
+html[data-theme="light"] .sw-dialog-busy .sw-upload-sub{color:#515671}
+html[data-theme="light"] .sw-dialog-busy em{color:#6a6f8c}
+html[data-theme="light"] .sw-dialog-busy .sw-upload-spin{border-color:rgba(27,31,61,.15);border-top-color:#f2a65a}
+html[data-theme="light"] .sw-dialog-busy .sw-upload-bar{background:rgba(27,31,61,.12)}
+@media (prefers-reduced-motion:reduce){.sw-dialog-busy{animation:none}}
+
+/* Upload progress: while a file is uploading the bar fills with the real percentage instead of sliding endlessly. */
+#sw-upload-card.determinate .sw-upload-bar i,
+.sw-dialog-busy.determinate .sw-upload-bar i{left:0;width:var(--pct,0%);animation:none;transition:width .25s ease-out}
+.sw-dialog-busy .sw-upload-title{font-variant-numeric:tabular-nums}
+
+/* Mood pills on song rows and in the player */
+.mood-pills{display:inline-flex;gap:5px;margin-left:8px;vertical-align:middle;white-space:nowrap}
+.mood-pill{border:0;cursor:pointer;padding:1px 8px;border-radius:999px;color:#fff;font:700 10px/1.6 inherit;letter-spacing:.02em;text-shadow:0 1px 1px rgba(0,0,0,.25);transition:transform .12s,filter .12s}
+.mood-pill:hover{transform:translateY(-1px);filter:brightness(1.12)}
+.mood-pill:focus-visible{outline:2px solid var(--accent,#f4a259);outline-offset:2px}
+@media (max-width:640px){.mood-pills .mood-pill:nth-child(n+2){display:none}}
+
+/* ====== CrowdQueue sidebar: styles for the markup crowdQueueRailHtml() actually renders ======
+   The rail markup was updated but these classes had no CSS (Copy Link showed as a grey block, the queue section collapsed
+   and the Leave button floated over the list). The rail itself scrolls, so the container grows with its content. */
+.cq-rail-container{height:auto;min-height:100%;gap:12px}
+.cq-rail-invite-text strong{font-size:14px;line-height:1.25;color:var(--text)}
+.cq-rail-invite-text small{font-size:11.5px;line-height:1.35;color:var(--muted)}
+.cq-copy-link-action{flex-shrink:0;display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border-radius:999px;border:1px solid rgba(242,166,90,.5);background:rgba(242,166,90,.14);color:var(--accent);font-family:inherit;font-size:12px;font-weight:800;line-height:1;white-space:nowrap;cursor:pointer;transition:background .15s,transform .15s}
+.cq-copy-link-action:hover{background:rgba(242,166,90,.26)}
+.cq-copy-link-action:active{transform:scale(.97)}
+.cq-copy-link-action:focus-visible,.cq-mini-btn:focus-visible,.cq-item-del:focus-visible,.cq-order-micro:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.cq-rail-status-bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.cq-rail-order-select{background:var(--slate-2);border:1px solid var(--edge);color:var(--text-2);font-size:11px;font-weight:700;padding:4px 8px;border-radius:999px;outline:none;max-width:100%}
+.cq-rail-np{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border-radius:12px;background:var(--slate);border:1px solid var(--edge)}
+.cq-rail-np-kicker{display:flex;align-items:center;gap:6px;font-size:10px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:var(--accent)}
+.cq-rail-np-meta{min-width:0;flex:1;display:flex;flex-direction:column}
+.cq-rail-np-meta strong{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cq-rail-np-btns{display:flex;gap:4px;margin-left:auto;flex-shrink:0}
+.cq-mini-btn{width:30px;height:30px;border-radius:50%;border:1px solid var(--edge-strong);background:var(--slate-2);color:var(--text);display:grid;place-items:center;cursor:pointer}
+.cq-mini-btn:hover{background:var(--slate)}
+.cq-mini-btn svg{width:14px;height:14px}
+.cq-rail-add-box{display:flex;flex-direction:column;gap:8px;min-width:0}
+.cq-rail-suggestions{display:flex;flex-direction:column;gap:6px;min-width:0}
+.cq-rail-queue-section{flex:0 0 auto}
+.cq-rail-queue-head h4{margin:0;font-size:14px}
+.cq-rail-list{display:flex;flex-direction:column;gap:6px;min-width:0}
+.cq-rail-item{min-width:0}
+.cq-rail-item-text{display:flex;flex-direction:column;gap:1px;flex:1;min-width:0}
+.cq-rail-item-text strong{font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cq-rail-item-text small{font-size:11.5px;color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cq-item-del,.cq-order-micro{width:24px;height:24px;border-radius:50%;border:1px solid var(--edge);background:transparent;color:var(--muted);display:grid;place-items:center;cursor:pointer;padding:0}
+.cq-item-del:hover,.cq-order-micro:hover{background:var(--slate-2);color:var(--text)}
+.cq-item-del svg{width:12px;height:12px}
+.cq-rail-reorder-pair{display:flex;flex-direction:column;gap:2px}
+.cq-rail-footer{margin-top:auto;padding-top:8px;flex-shrink:0}
+.cq-rail-footer .button{width:100%;justify-content:center;position:static}
+.w-full{width:100%}
+
+/* ============================================================
+   Live Room (CrowdQueue) side panel - narrow-rail layout fix
+   Stacks the invite card, wraps Quick Add chips, gives Now Playing
+   its own control row and stops queue rows from squeezing titles.
+   ============================================================ */
+.context-rail .cq-rail-container{gap:14px;padding-bottom:12px}
+.context-rail .cq-rail-title{padding:12px 14px;gap:10px}
+.context-rail .cq-rail-heading{flex:1;min-width:0}
+.context-rail .cq-rail-heading h2{font-size:17px;line-height:1.2}
+.context-rail .cq-rail-title .rail-tools{display:flex;align-items:center;gap:6px;flex-shrink:0}
+.context-rail .cq-pill-switch{padding:6px 12px;font-size:12px;white-space:nowrap}
+
+/* Invite card: text on top, full-width button below */
+.context-rail .cq-rail-invite-card{flex-direction:column;align-items:stretch;justify-content:flex-start;gap:10px;padding:12px 14px}
+.context-rail .cq-rail-invite-text{gap:3px}
+.context-rail .cq-rail-invite-text strong{font-size:15px}
+.context-rail .cq-rail-invite-text small{font-size:12px}
+.context-rail .cq-copy-link-action{width:100%;justify-content:center;padding:10px 14px;font-size:13px;border-radius:10px}
+
+/* Status row: pills together, order select on its own full row */
+.context-rail .cq-rail-status-bar{gap:6px 6px}
+.context-rail .cq-stat-pill{padding:5px 10px;font-size:11.5px;white-space:nowrap}
+.context-rail .cq-rail-order-select{flex:1 1 100%;width:100%;height:34px;padding:0 30px 0 12px;border-radius:10px;font-size:12.5px;cursor:pointer;
+  -webkit-appearance:none;appearance:none;
+  background-color:var(--slate-2);
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23a9b0c4' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 11px center}
+.context-rail .cq-rail-order-select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* Now playing: art + text on top, controls centred underneath */
+.context-rail .cq-rail-np{padding:12px 14px;gap:10px;border-radius:12px}
+.context-rail .cq-rail-np-body{display:grid;grid-template-columns:52px minmax(0,1fr);grid-template-areas:"art meta" "btns btns";gap:10px 12px;align-items:center}
+.context-rail .cq-rail-np-art{grid-area:art;width:52px;height:52px;border-radius:10px;object-fit:cover}
+.context-rail .cq-rail-np-art.placeholder-art{display:grid;place-items:center}
+.context-rail .cq-rail-np-meta{grid-area:meta;min-width:0;gap:3px}
+.context-rail .cq-rail-np-meta strong{display:block;font-size:14px;font-weight:700;line-height:1.25;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.context-rail .cq-rail-np-meta small{display:block;font-size:12px;color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.context-rail .cq-rail-np-btns{grid-area:btns;display:flex;justify-content:center;gap:12px;margin:0}
+.context-rail .cq-mini-btn{width:38px;height:38px;flex:0 0 38px;padding:0}
+.context-rail .cq-mini-btn svg{width:16px;height:16px}
+.context-rail .cq-rail-np-btns #cq-rail-np-play{background:var(--accent);border-color:var(--accent);color:#0c0e18}
+.context-rail .cq-rail-np-btns #cq-rail-np-play:hover{filter:brightness(1.08)}
+
+/* Add box: search + wrapping quick-add chips */
+.context-rail .cq-rail-add-box{gap:10px}
+.context-rail .cq-rail-search-bar input{height:38px;padding:0 30px 0 32px;font-size:12.5px;border-radius:10px;text-overflow:ellipsis}
+.context-rail .cq-rail-search-bar input::placeholder{font-size:12px;text-overflow:ellipsis}
+.context-rail .cq-search-icon{left:11px}
+.context-rail .cq-sug-label{font-size:11px;font-weight:700;letter-spacing:.04em;color:var(--muted);flex-shrink:0}
+.context-rail .cq-sug-chips{flex-wrap:wrap;overflow:visible;gap:6px;padding-bottom:0}
+.context-rail .cq-sug-chip{max-width:100%;min-width:0;padding:5px 10px;font-size:12px;flex-shrink:1}
+.context-rail .cq-sug-chip svg{width:12px;height:12px;flex-shrink:0;color:var(--accent)}
+.context-rail .cq-sug-chip span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Queue: rank + art + text on row one, vote/remove on row two */
+.context-rail .cq-rail-queue-head{display:flex;align-items:center;justify-content:space-between}
+.context-rail .cq-rail-queue-head h4{font-size:14px;font-weight:800}
+.context-rail .cq-rail-list{gap:8px}
+.context-rail .cq-rail-item{display:grid;grid-template-columns:20px 42px minmax(0,1fr);grid-template-areas:"rank art text" ". . actions";gap:6px 10px;align-items:center;padding:10px 12px;border-radius:12px}
+.context-rail .cq-rail-item-rank{grid-area:rank;width:auto;font-size:12px}
+.context-rail .cq-rail-item-art{grid-area:art;width:42px;height:42px;border-radius:8px}
+.context-rail .cq-rail-item-art.placeholder-art{display:grid;place-items:center}
+.context-rail .cq-rail-item-text{grid-area:text;min-width:0;gap:2px}
+.context-rail .cq-rail-item-text strong{font-size:13.5px;line-height:1.25}
+.context-rail .cq-rail-item-actions{grid-area:actions;justify-self:start;display:flex;flex-direction:row;align-items:center;gap:8px;flex-wrap:wrap}
+.context-rail .cq-vote-pill{padding:5px 11px;font-size:12.5px}
+.context-rail .cq-item-del,.context-rail .cq-order-micro{width:28px;height:28px}
+.context-rail .cq-rail-reorder-pair{flex-direction:row;gap:6px}
+.context-rail .cq-rail-empty-queue{padding:18px 12px}
+.context-rail .cq-rail-footer{padding-top:4px}
+
+/* ============================================================
+   CrowdQueue - page polish, live progress, sync status, avatars
+   ============================================================ */
+.cq-session-head{position:relative;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.22)}
+.cq-session-head::before{content:"";position:absolute;inset:0 0 auto 0;height:3px;background:linear-gradient(90deg,var(--accent),rgba(242,166,90,.15) 70%,transparent)}
+.cq-session-meta{gap:8px 12px}
+.cq-session-meta strong{color:var(--text)}
+.cq-listeners{display:inline-flex;align-items:center;gap:8px}
+.cq-avatars{display:inline-flex;align-items:center}
+.cq-avatar{display:grid;place-items:center;width:24px;height:24px;margin-left:-6px;border-radius:50%;border:2px solid var(--slate);background:var(--slate-2);color:var(--text);font-size:11px;font-weight:800;box-shadow:0 0 0 1px var(--edge)}
+.cq-avatar:first-child{margin-left:0}
+.cq-avatar.is-host{background:var(--accent);color:#0c0e18}
+.cq-avatar.more{background:var(--slate);color:var(--text-2);font-size:10px}
+
+/* Now playing spotlight */
+.cq-now-playing{position:relative;overflow:hidden;gap:18px;padding:20px 24px;border-radius:18px;box-shadow:0 12px 34px rgba(0,0,0,.25)}
+.cq-now-playing::after{content:"";position:absolute;right:-60px;top:-60px;width:220px;height:220px;border-radius:50%;background:radial-gradient(circle,rgba(242,166,90,.18),transparent 70%);pointer-events:none}
+.cq-np-art{width:76px;height:76px;border-radius:14px;box-shadow:0 8px 22px rgba(0,0,0,.4)}
+.cq-np-details{gap:6px}
+.cq-np-details strong{font-size:19px;letter-spacing:-.01em}
+.cq-np-controls{gap:10px;flex-wrap:wrap}
+
+/* Live progress bar (everyone sees where the room is in the song) */
+.cq-np-progress{display:flex;align-items:center;gap:10px;margin-top:6px;font-size:11.5px;font-variant-numeric:tabular-nums;color:var(--text-2)}
+.cq-np-track{position:relative;flex:1;min-width:60px;height:5px;border-radius:999px;background:rgba(255,255,255,.12);overflow:hidden}
+.cq-np-track i{position:absolute;inset:0 auto 0 0;width:0;border-radius:inherit;background:linear-gradient(90deg,var(--accent),#ffd29a);transition:width .5s linear}
+
+/* Sync status chip */
+.cq-sync-chip{display:inline-flex;align-items:center;gap:7px;padding:6px 12px;border-radius:999px;border:1px solid var(--edge-strong);background:var(--slate-2);color:var(--text-2);font-family:inherit;font-size:12px;font-weight:700;line-height:1;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis;cursor:default}
+button.cq-sync-chip{cursor:pointer}
+.cq-sync-chip b{width:8px;height:8px;border-radius:50%;background:var(--muted);flex-shrink:0}
+.cq-sync-chip.is-ok{border-color:rgba(16,185,129,.4);color:#6ee7b7;background:rgba(16,185,129,.1)}
+.cq-sync-chip.is-ok b{background:#10b981;box-shadow:0 0 8px #10b981}
+.cq-sync-chip.is-host{border-color:rgba(242,166,90,.4);color:var(--accent);background:var(--accent-soft)}
+.cq-sync-chip.is-host b{background:var(--accent);box-shadow:0 0 8px var(--accent)}
+.cq-sync-chip.is-busy{border-color:rgba(96,165,250,.4);color:#93c5fd;background:rgba(96,165,250,.1)}
+.cq-sync-chip.is-busy b{background:#60a5fa;animation:cqPulse 1s infinite}
+.cq-sync-chip.is-warn{border-color:rgba(248,113,113,.5);color:#fca5a5;background:rgba(248,113,113,.12)}
+.cq-sync-chip.is-warn b{background:#f87171}
+.cq-sync-chip.is-warn:hover,.cq-sync-chip.is-ok:hover{filter:brightness(1.15)}
+.cq-sync-chip:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* Side panel: progress + chip under Now Playing */
+.context-rail .cq-rail-np-sync{display:flex;flex-direction:column;gap:10px;margin-top:2px}
+.context-rail .cq-rail-np-sync .cq-np-progress{margin-top:0}
+.context-rail .cq-rail-np-sync .cq-sync-chip{align-self:flex-start}
+
+/* Queue rows */
+.cq-queue-item{border-radius:14px;padding:11px 16px}
+.cq-queue-item.is-playing{box-shadow:inset 3px 0 0 var(--accent)}
+.cq-queue-head h3{font-size:18px}
+.cq-item-art{width:46px;height:46px;border-radius:10px}
+
+@media (max-width:720px){
+  .cq-now-playing{padding:16px;gap:14px}
+  .cq-np-art{width:60px;height:60px}
+  .cq-np-controls{width:100%}
+  .cq-session-head{padding:16px}
+}
+@media (prefers-reduced-motion:reduce){.cq-np-track i{transition:none}.cq-sync-chip.is-busy b{animation:none}}
+
+.cq-sync-chip{flex-shrink:1;min-width:0}
+.context-rail .cq-rail-np-sync .cq-sync-chip{align-self:stretch;justify-content:center}
