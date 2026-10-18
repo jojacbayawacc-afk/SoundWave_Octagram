@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https://azqbzyxknfdwfuqevbrd.supabase.co; media-src 'self' blob: https://azqbzyxknfdwfuqevbrd.supabase.co; connect-src 'self' https://azqbzyxknfdwfuqevbrd.supabase.co wss://azqbzyxknfdwfuqevbrd.supabase.co; object-src 'none'; base-uri 'self'; form-action 'self'">
-<meta name="theme-color" content="#000000"/>
+<meta name="theme-color" content="#0f1218"/>
 <meta name="description" content="SoundWave — discover music, artists, albums and podcasts."/>
 <title>SoundWave | Music for every moment</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%20512%20512%22%3E%3Crect%20width%3D%22512%22%20height%3D%22512%22%20rx%3D%22112%22%20fill%3D%22%23000%22/%3E%3Cg%20fill%3D%22none%22%20stroke%3D%22%231ed760%22%20stroke-width%3D%2230%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M200%20360V150l190-36v206M200%20214l190-36%22/%3E%3Cellipse%20cx%3D%22156%22%20cy%3D%22360%22%20rx%3D%2244%22%20ry%3D%2232%22/%3E%3Cellipse%20cx%3D%22346%22%20cy%3D%22320%22%20rx%3D%2244%22%20ry%3D%2232%22/%3E%3C/g%3E%3C/svg%3E%0A" type="image/svg+xml"/>
@@ -19,11 +19,15 @@
 <meta property="og:image" content="icons/icon-512.svg"/>
 <meta name="twitter:card" content="summary_large_image"/>
 <link rel="manifest" href="manifest.webmanifest"/>
-<link rel="stylesheet" href="style.css?v=48"/>
+<script>try{var t=localStorage.getItem("soundwave-theme");if(t!=="light")t="dark";document.documentElement.dataset.theme=t;document.documentElement.style.colorScheme=t}catch(e){}</script>
+<link rel="stylesheet" href="style.css?v=60"/>
+<link rel="stylesheet" href="theme.css?v=107"/>
+<link rel="stylesheet" href="theme-light.css?v=90"/>
 </head>
 <body>
-<div id="app"></div>
+<div id="app"><div class="boot-skeleton" aria-busy="true" aria-label="Loading SoundWave"><aside><i class="sk-logo"></i><i></i><i></i><i></i><i></i></aside><main><i class="sk-hero"></i><div class="sk-row"><i></i><i></i><i></i><i></i><i></i></div><div class="sk-row"><i></i><i></i><i></i><i></i><i></i></div></main></div></div>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script type="module" src="app.js?v=48"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script type="module" src="app.js?v=111"></script>
 </body>
 </html>
