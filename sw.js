@@ -1,5 +1,5 @@
-const CACHE='soundwave-shell-v47';
-const SHELL=['./','./index.html','./style.css?v=47','./app.js?v=47','./manifest.webmanifest'];
+const CACHE='soundwave-shell-v111';
+const SHELL=['./','./index.html','./style.css?v=60','./app.js?v=111','./theme.css?v=107','./theme-light.css?v=90','./manifest.webmanifest'];
 const SENSITIVE_KEYS=new Set(['code','error','error_description','maya','rrn','playlist_invite','subscription_invite','token','access_token','refresh_token']);
 const isSensitive=(url)=>url.pathname.endsWith('/auth-callback.html')||[...url.searchParams.keys()].some(k=>SENSITIVE_KEYS.has(k));
 self.addEventListener('install',event=>event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(SHELL)).then(()=>self.skipWaiting())));
