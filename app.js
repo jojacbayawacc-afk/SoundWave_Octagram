@@ -20,28 +20,113 @@ function swUploadCard() {
   return el;
 }
 function swUploadTick() {
-  const el = document.getElementById('sw-upload-card'); if (!el) return;
-  const s = Math.floor((Date.now() - swUploadStart) / 1000);
-  const t = el.querySelector('.sw-upload-time'); if (t) t.textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+  const s = Math.floor((Date.now() - swUploadStart) / 1000), txt = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+  document.querySelectorAll('.sw-upload-time').forEach(t => { t.textContent = txt; });
+  swSyncUploadUi();
 }
-function swUploadBusy(file, promise) {
+// A modal <dialog> sits in the browser's top layer, above anything on the page, so the floating card cannot be seen
+// while an upload dialog is open. While one is open the loading state is drawn INSIDE it (a full overlay that also
+// stops the dialog being closed mid-upload); with no dialog open the floating card is used.
+function swSyncUploadUi() {
+  const card = document.getElementById('sw-upload-card');
+  const open = [...document.querySelectorAll('dialog[open]')].filter(d => { try { return d.matches(':modal'); } catch { return true; } });
+  const dlg = swUploadsActive ? open[open.length - 1] : null;
+  document.querySelectorAll('.sw-dialog-busy').forEach(o => { if (o.parentElement !== dlg) { o.parentElement?.removeAttribute('aria-busy'); o.remove(); } });
+  if (!card) return;
+  if (!swUploadsActive) { card.classList.remove('show'); return; }
+  if (!dlg) { card.classList.add('show'); return; }
+  let o = dlg.querySelector(':scope > .sw-dialog-busy');
+  if (!o) {
+    o = document.createElement('div'); o.className = 'sw-dialog-busy'; o.setAttribute('role', 'status'); o.setAttribute('aria-live', 'polite');
+    o.innerHTML = '<span class="sw-upload-spin" aria-hidden="true"></span><strong class="sw-upload-title"></strong><small class="sw-upload-sub"></small><span class="sw-upload-bar" aria-hidden="true"><i></i></span><em>Please keep this window open until it finishes.</em>';
+    dlg.append(o); dlg.setAttribute('aria-busy', 'true');
+  }
+  o.style.top = dlg.scrollTop + 'px'; o.style.height = dlg.clientHeight + 'px';
+  const t = o.querySelector('.sw-upload-title'), sub = o.querySelector('.sw-upload-sub');
+  const nt = card.querySelector('.sw-upload-title').textContent, ns = card.querySelector('.sw-upload-sub').innerHTML;
+  if (t.textContent !== nt) t.textContent = nt; if (sub.innerHTML !== ns) sub.innerHTML = ns;
+  o.classList.toggle('determinate', card.classList.contains('determinate')); o.style.setProperty('--pct', card.style.getPropertyValue('--pct') || '0%');
+  card.classList.remove('show');
+}
+// Esc must not cancel a dialog while its upload is running.
+document.addEventListener('cancel', e => { if (swUploadsActive && e.target?.tagName === 'DIALOG') e.preventDefault(); }, true);
+// ---- Publish session -------------------------------------------------------------------------------------
+// A publish is several steps (check file -> upload audio -> upload artwork -> save row -> lyrics -> instrumental ->
+// reload library). The loading overlay used to be tied to each single storage upload, so it vanished the moment the
+// audio finished and the dialog looked idle/frozen while the rest ran. A session keeps the overlay up for the WHOLE
+// publish, shows which stage it is on, and shows a real percentage while a file is uploading.
+let swSession = null;
+function swSetCard(title, detail) {
+  const el = swUploadCard(); el.querySelector('.sw-upload-title').textContent = title;
+  const sub = el.querySelector('.sw-upload-sub'); sub.innerHTML = '';
+  const name = document.createElement('span'); name.textContent = detail || 'Please keep this window open';
+  const time = document.createElement('span'); time.className = 'sw-upload-time';
+  const s = Math.floor((Date.now() - swUploadStart) / 1000); time.textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+  sub.append(name, ' · ', time); swSyncUploadUi();
+}
+function swStage(title, detail) {
+  if (!swSession) return; swSession.title = title; swSession.detail = detail || '';
+  const el = swUploadCard(); el.classList.remove('determinate'); el.style.removeProperty('--pct'); swSetCard(title, detail);
+}
+function swProgress(frac) {
+  if (!swSession) return; const pct = Math.max(0, Math.min(100, Math.round(frac * 100)));
+  const el = swUploadCard(); el.classList.add('determinate'); el.style.setProperty('--pct', pct + '%');
+  swSetCard(`${swSession.title.replace(/\s*\d+%$/, '')} ${pct}%`, swSession.detail);
+}
+async function swRun(title, fn) {
+  const nested = Boolean(swSession); if (nested) return fn();
+  swSession = { title, detail: '' }; swUploadsActive++;
+  if (swUploadsActive === 1) { swUploadStart = Date.now(); clearInterval(swUploadTimer); swUploadTimer = setInterval(swUploadTick, 500); }
+  try { const el = swUploadCard(); el.classList.remove('done'); el.classList.add('show'); swSetCard(title, 'Getting ready…'); } catch { }
+  try { return await fn(); }
+  finally {
+    swSession = null; swUploadsActive = Math.max(0, swUploadsActive - 1);
+    try { if (!swUploadsActive) clearInterval(swUploadTimer); const el = document.getElementById('sw-upload-card'); el?.classList.remove('determinate'); el?.style.removeProperty('--pct'); swSyncUploadUi(); } catch { }
+  }
+}
+// supabase-js cannot report upload progress, so during a publish session files go straight to the Storage REST
+// endpoint with XHR (same URL, auth and headers supabase-js uses). Returns null when it can't be used, so the
+// caller falls back to the normal supabase-js upload.
+async function swXhrUpload(bucket, path, file, opts = {}) {
+  if (!(file instanceof Blob)) return null;
+  let token = ''; try { token = (await db.auth.getSession())?.data?.session?.access_token || ''; } catch { }
+  if (!token) return null;
+  const url = `${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(bucket)}/${String(path).split('/').map(encodeURIComponent).join('/')}`;
+  return new Promise(resolve => {
+    const xhr = new XMLHttpRequest(), fd = new FormData();
+    fd.append('cacheControl', String(opts.cacheControl || '3600'));
+    fd.append('', opts.contentType ? new Blob([file], { type: opts.contentType }) : file, file.name || 'file');
+    xhr.open('POST', url); xhr.setRequestHeader('Authorization', 'Bearer ' + token); xhr.setRequestHeader('apikey', SUPABASE_KEY); xhr.setRequestHeader('x-upsert', opts.upsert ? 'true' : 'false');
+    xhr.upload.onprogress = ev => { if (ev.lengthComputable && ev.total > 0) swProgress(ev.loaded / ev.total); };
+    xhr.onerror = xhr.ontimeout = () => resolve({ data: null, error: { message: 'The upload was interrupted. Check your connection and try again.' } });
+    xhr.onload = () => {
+      let body = {}; try { body = JSON.parse(xhr.responseText || '{}'); } catch { }
+      if (xhr.status >= 200 && xhr.status < 300) { swProgress(1); resolve({ data: { path: body.Key ? path : path, id: body.Id, fullPath: body.Key }, error: null }); }
+      else resolve({ data: null, error: { message: body.message || body.error || `Upload failed (${xhr.status})`, statusCode: String(xhr.status), status: xhr.status } });
+    };
+    xhr.send(fd);
+  });
+}
+function swUploadBusy(file, promise, what) {
   let label = 'file';
   try { if (file && file.name) label = `${file.name} (${swFmtBytes(file.size)})`; else if (file && file.size) label = swFmtBytes(file.size); } catch { }
   try {
     swUploadsActive++;
     const el = swUploadCard();
-    el.querySelector('.sw-upload-title').textContent = swUploadsActive > 1 ? `Uploading ${swUploadsActive} files…` : 'Uploading…';
-    el.querySelector('.sw-upload-sub').innerHTML = '';
-    const name = document.createElement('span'); name.textContent = swUploadsActive > 1 ? 'Please keep this window open' : label;
-    const time = document.createElement('span'); time.className = 'sw-upload-time'; time.textContent = '0:00';
-    el.querySelector('.sw-upload-sub').append(name, ' · ', time);
-    el.classList.remove('done'); el.classList.add('show');
+    if (!swSession) { // inside a publish session the session owns the text (stage + percentage)
+      el.querySelector('.sw-upload-title').textContent = swUploadsActive > 1 ? `Uploading ${swUploadsActive} files…` : (what ? `Uploading your ${what}…` : 'Uploading…');
+      el.querySelector('.sw-upload-sub').innerHTML = '';
+      const name = document.createElement('span'); name.textContent = swUploadsActive > 1 ? 'Please keep this window open' : label;
+      const time = document.createElement('span'); time.className = 'sw-upload-time'; time.textContent = '0:00';
+      el.querySelector('.sw-upload-sub').append(name, ' · ', time);
+    }
+    el.classList.remove('done'); el.classList.add('show'); swSyncUploadUi();
     if (swUploadsActive === 1) { swUploadStart = Date.now(); clearInterval(swUploadTimer); swUploadTimer = setInterval(swUploadTick, 500); }
   } catch { }
   const finish = () => {
     try {
       swUploadsActive = Math.max(0, swUploadsActive - 1);
-      if (!swUploadsActive) { clearInterval(swUploadTimer); document.getElementById('sw-upload-card')?.classList.remove('show'); }
+      if (!swUploadsActive) clearInterval(swUploadTimer); swSyncUploadUi();
     } catch { }
   };
   return Promise.resolve(promise).then(r => { finish(); return r; }, e => { finish(); throw e; });
@@ -49,8 +134,11 @@ function swUploadBusy(file, promise) {
 if (db && db.storage && typeof db.storage.from === 'function') {
   const rawFrom = db.storage.from.bind(db.storage);
   db.storage.from = (bucket) => {
-    const b = rawFrom(bucket);
-    if (b && typeof b.upload === 'function') { const rawUpload = b.upload.bind(b); b.upload = (path, file, opts) => swUploadBusy(file, rawUpload(path, file, opts)); }
+    const b = rawFrom(bucket), what = ({ 'song-audio': 'song', 'podcast-audio': 'podcast episode', covers: 'artwork', 'profile-images': 'photo' })[bucket] || '';
+    if (b && typeof b.upload === 'function') {
+      const rawUpload = b.upload.bind(b);
+      b.upload = (path, file, opts) => swUploadBusy(file, swSession ? swXhrUpload(bucket, path, file, opts).then(r => r || rawUpload(path, file, opts)) : rawUpload(path, file, opts), what);
+    }
     return b;
   };
 }
@@ -461,7 +549,7 @@ function trackRow(s, i, q, { showAlbum, remove, albumHtml, histId, extraCell, ex
   const artist = s.album?.artist;
   const downloaded = hasDownloadedSong(s.song_id);
   const extraHtml = hasExtra ? `<span class="t-extra ${extraClass ? `t-extra-${extraClass}` : ''}">${extraCell?.(s, i) ?? '—'}</span>` : '';
-  return `<div class="track ${downloaded ? 'is-downloaded' : ''}" role="row" tabindex="0" data-song="${s.song_id}" data-queue="${q}"><span class="t-num"><b>${i + 1}</b><button type="button" class="t-play" data-play="${s.song_id}" aria-label="Play ${esc(s.song_title)}">${icon('play')}</button><i class="eq" aria-hidden="true"><s></s><s></s><s></s></i></span><span class="t-title">${albumArt(s, 'tiny')}<span class="t-text"><strong>${esc(s.song_title)}${downloaded ? `<span class="track-state-badge" title="Downloaded for offline listening">${icon('download')} Downloaded</span>` : ''}</strong><small>${artist ? `<a href="#/artist-detail/${artist.artist_id}" data-open-artist="${artist.artist_id}">${esc(artist.artist_name)}</a>` : 'SoundWave'}</small></span></span>${showAlbum ? `<span class="t-album">${albumHtml ?? (s.album ? `<a href="#/album-detail/${s.album.album_id}" data-open-album="${s.album.album_id}">${esc(s.album.album_title)}</a>` : '')}</span>` : ''}${extraHtml}<span class="t-like">${heartBtn(s.song_id)}</span><span class="t-time">${downloaded ? `<span class="track-download-icon" title="Downloaded">${icon('download')}</span>` : ''}${nice(s.duration_seconds)}</span><span class="t-more">${(typeof crowdQueue !== "undefined" && crowdQueue.session?.status === "active") ? `<button type="button" class="t-cq-add" data-quick-add-cq="${s.song_id}" aria-label="Add ${esc(s.song_title)} to CrowdQueue" title="Add to CrowdQueue"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></button>` : ''}<button type="button" class="song-more" data-song-menu="${s.song_id}" aria-label="More options for ${esc(s.song_title)}">${icon('dots')}</button>${remove ? `<button type="button" class="t-remove" data-remove="${s.song_id}" aria-label="Remove from playlist">${icon('close')}</button>` : ''}${histId ? `<button type="button" class="t-remove" data-histdelete="${histId}" aria-label="Remove from history" title="Remove from history">${icon('close')}</button>` : ''}</span></div>`;
+  return `<div class="track ${downloaded ? 'is-downloaded' : ''}" role="row" tabindex="0" data-song="${s.song_id}" data-queue="${q}"><span class="t-num"><b>${i + 1}</b><button type="button" class="t-play" data-play="${s.song_id}" aria-label="Play ${esc(s.song_title)}">${icon('play')}</button><i class="eq" aria-hidden="true"><s></s><s></s><s></s></i></span><span class="t-title">${albumArt(s, 'tiny')}<span class="t-text"><strong>${esc(s.song_title)}${downloaded ? `<span class="track-state-badge" title="Downloaded for offline listening">${icon('download')} Downloaded</span>` : ''}</strong><small>${artist ? `<a href="#/artist-detail/${artist.artist_id}" data-open-artist="${artist.artist_id}">${esc(artist.artist_name)}</a>` : 'SoundWave'}${moodPillsHtml(s, 2)}</small></span></span>${showAlbum ? `<span class="t-album">${albumHtml ?? (s.album ? `<a href="#/album-detail/${s.album.album_id}" data-open-album="${s.album.album_id}">${esc(s.album.album_title)}</a>` : '')}</span>` : ''}${extraHtml}<span class="t-like">${heartBtn(s.song_id)}</span><span class="t-time">${downloaded ? `<span class="track-download-icon" title="Downloaded">${icon('download')}</span>` : ''}${nice(s.duration_seconds)}</span><span class="t-more">${(typeof crowdQueue !== "undefined" && crowdQueue.session?.status === "active") ? `<button type="button" class="t-cq-add" data-quick-add-cq="${s.song_id}" aria-label="Add ${esc(s.song_title)} to CrowdQueue" title="Add to CrowdQueue"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></button>` : ''}<button type="button" class="song-more" data-song-menu="${s.song_id}" aria-label="More options for ${esc(s.song_title)}">${icon('dots')}</button>${remove ? `<button type="button" class="t-remove" data-remove="${s.song_id}" aria-label="Remove from playlist">${icon('close')}</button>` : ''}${histId ? `<button type="button" class="t-remove" data-histdelete="${histId}" aria-label="Remove from history" title="Remove from history">${icon('close')}</button>` : ''}</span></div>`;
 }
 function playRow(r) { const q = (r.dataset.queue || '').split(',').filter(Boolean).map(Number); playAction(() => playSong(Number(r.dataset.song), q)); }
 
@@ -1681,7 +1769,7 @@ function playerBarHtml(d) {
   const mobileQuickActions = !idle && !podcast ? `<div class="mobile-now-actions"><button type="button" id="mobile-queue-toggle" class="mobile-now-icon-action" aria-pressed="${Boolean(state.mobileQueueOpen)}" aria-label="Open queue">${icon('queue')}<span class="sr-only">Queue</span></button><button type="button" id="mobile-lyrics-toggle" class="mobile-now-icon-action" aria-pressed="${Boolean(state.mobileLyricsOpen)}" aria-label="Open lyrics">${icon('music')}<span class="sr-only">Lyrics</span></button>${playerToolButtons(false, 'mobile-now-icon-action', 'mobile')}</div>` : '';
   const mobileQueuePanel = !idle && !podcast ? `<section class="mobile-now-queue" id="mobile-now-queue" hidden><div class="mobile-now-sheet-head"><h3>Queue</h3></div><div id="mobile-now-queue-content">${mobileQueueMarkup()}</div></section>` : '';
   return `<div class="custom-playbar ${idle ? 'idle-playbar' : ''}">
- <div class="player-song"><div class="mobile-now-open" id="mobile-now-open" role="button" tabindex="0" aria-label="Open now playing details"><span class="player-thumb ${idle ? 'idle-thumb' : ''}">${thumb}</span><span class="player-song-text"><strong>${esc(d?.title || 'SoundWave')}</strong><small>${idle ? 'Choose something to play' : artistId ? `<a href="#/artist-detail/${artistId}" data-open-artist="${artistId}">${esc(d.artist)}</a>` : esc(d.artist)}</small></span></div>${song ? heartBtn(song.song_id, 'player-heart') : ''}</div>
+ <div class="player-song"><div class="mobile-now-open" id="mobile-now-open" role="button" tabindex="0" aria-label="Open now playing details"><span class="player-thumb ${idle ? 'idle-thumb' : ''}">${thumb}</span><span class="player-song-text"><strong>${esc(d?.title || 'SoundWave')}</strong><small>${idle ? 'Choose something to play' : artistId ? `<a href="#/artist-detail/${artistId}" data-open-artist="${artistId}">${esc(d.artist)}</a>` : esc(d.artist)}${song ? moodPillsHtml(song, 2) : ''}</small></span></div>${song ? heartBtn(song.song_id, 'player-heart') : ''}</div>
  <div class="player-center"><div class="play-controls">
   ${podcast ? '' : `<button type="button" id="sw-shuffle" class="icon-quiet mode ${prefs.shuffle ? 'active' : ''}" aria-pressed="${prefs.shuffle}" aria-label="Shuffle" title="Shuffle" ${dis}>${icon('shuffle')}</button>`}
   <button type="button" id="sw-prev" class="icon-quiet" aria-label="${podcast ? 'Back 15 seconds' : 'Previous song'}" title="${podcast ? 'Back 15 seconds' : 'Previous'}" ${dis}>${podcast ? '<span class="skip-15">−15</span>' : icon('prev')}</button>
@@ -1877,7 +1965,7 @@ function bindPlayerBar(audio, details, token) {
     try { if ('mediaSession' in navigator && dur() > 0) navigator.mediaSession.setPositionState({ duration: dur(), position: Math.min(audio.currentTime, dur()), playbackRate: audio.playbackRate }); } catch { }
   };
   $('#sw-toggle').onclick = () => { if (audio.paused) audio.play().catch((e) => toast(humanErr(e), true)); else audio.pause(); };
-  $('#mobile-now-open')?.addEventListener('click', (e) => { if (e.target.closest('.heart-btn') || e.target.closest('a')) return; const panel = $('#mobile-now-playing'); if (panel) { panel.classList.add('open'); panel.setAttribute('aria-hidden', 'false'); panel.classList.toggle('show-lyrics', Boolean(state.mobileLyricsOpen)); panel.classList.toggle('show-queue', Boolean(state.mobileQueueOpen)); document.body.classList.add('mobile-player-open'); const lp = $('#mobile-now-lyrics'); if (lp) lp.hidden = !state.mobileLyricsOpen; const qp = $('#mobile-now-queue'); if (qp) qp.hidden = !state.mobileQueueOpen; } });
+  $('#mobile-now-open')?.addEventListener('click', (e) => { if (e.target.closest('.heart-btn') || e.target.closest('a') || e.target.closest('.mood-pill')) return; const panel = $('#mobile-now-playing'); if (panel) { panel.classList.add('open'); panel.setAttribute('aria-hidden', 'false'); panel.classList.toggle('show-lyrics', Boolean(state.mobileLyricsOpen)); panel.classList.toggle('show-queue', Boolean(state.mobileQueueOpen)); document.body.classList.add('mobile-player-open'); const lp = $('#mobile-now-lyrics'); if (lp) lp.hidden = !state.mobileLyricsOpen; const qp = $('#mobile-now-queue'); if (qp) qp.hidden = !state.mobileQueueOpen; } });
   $('#mobile-now-open')?.addEventListener('keydown', (e) => { if ((e.key === 'Enter' || e.key === ' ') && !e.target.closest('a')) { e.preventDefault(); $('#mobile-now-open').click(); } });
   $('#mobile-now-close')?.addEventListener('click', () => { const panel = $('#mobile-now-playing'); if (panel) { panel.classList.remove('open'); panel.setAttribute('aria-hidden', 'true'); panel.classList.remove('show-lyrics', 'show-queue'); document.body.classList.remove('mobile-player-open'); } state.mobileLyricsOpen = false; state.mobileQueueOpen = false; const lp = $('#mobile-now-lyrics'); if (lp) lp.hidden = true; const qp = $('#mobile-now-queue'); if (qp) qp.hidden = true; });
   $('#mobile-now-toggle')?.addEventListener('click', () => { if (audio.paused) audio.play().catch((e) => toast(humanErr(e), true)); else audio.pause(); });
@@ -1915,7 +2003,16 @@ function bindPlayerBar(audio, details, token) {
   }); audio.addEventListener('loadedmetadata', sync); audio.addEventListener('durationchange', sync);
   audio.onplay = () => { sync(); markPlaying(); if (live()) details.createPromise = createListening(); };
   audio.onpause = () => { sync(); markPlaying(); if (live()) void saveListening(false); };
-  audio.onended = () => { sync(); markPlaying(); if (live()) action(async () => { await saveListening(true); if (sleepAfterTrack()) return; if (details.kind === 'song') await skip(1, true); }); };
+  audio.onended = () => {
+    sync(); markPlaying();
+    const cqLive = Boolean(crowdQueue.session && crowdQueue.session.status === 'active' && details.kind === 'song');
+    if (cqLive && live()) {
+      // In a CrowdQueue room the host's queue decides what plays next; listeners simply wait for the host.
+      action(async () => { await saveListening(true); if (sleepAfterTrack()) return; if (crowdQueue.session?.is_host) await hostPlayNextInCrowdQueue({ auto: true }); }, { quiet: true });
+      return;
+    }
+    if (live()) action(async () => { await saveListening(true); if (sleepAfterTrack()) return; if (details.kind === 'song') await skip(1, true); });
+  };
   audio.onerror = async () => {
     if (audio.dataset.track === 'instrumental' && live() && details.kind === 'song') { state.karaokeVoice = 'original'; toast('The karaoke track could not be played. Switched to the original.', true); updateKaraokeVoiceUi(); void reconcileKaraokeAudio(); return; }
     if (!live() || details.retried || details.offline || details.kind !== 'song') { if (live()) toast('This track could not be played.', true); return; }
@@ -3746,18 +3843,22 @@ function podcastStudioAnalytics() {
     if (dur > 0) { e.frac += Math.min(1, played / dur); e.fracN++; }
     e.last = Math.max(e.last, new Date(r.stream_date).getTime() || 0);
   }
-  const episodeRows = ownEpisodes.map(ep => { const e = epStats.get(Number(ep.episode_id)); const showTitle = (state.myShows || []).find(sh => Number(sh.show_id) === Number(ep.show_id))?.show_title || '';
-    return { id: Number(ep.episode_id), showId: Number(ep.show_id), title: ep.episode_title || `Episode ${ep.episode_id}`, show: showTitle, listens: e?.n || 0, listeners: e?.users.size || 0, done: e?.done || 0, completion: e?.n ? Math.round(e.done / e.n * 100) : 0, avgSec: e?.n ? Math.round(e.sec / e.n) : 0, avgFrac: e?.fracN ? Math.round(e.frac / e.fracN * 100) : null, last: e?.last || 0 }; }).sort((a, b) => b.listens - a.listens);
+  const episodeRows = ownEpisodes.map(ep => {
+    const e = epStats.get(Number(ep.episode_id)); const showTitle = (state.myShows || []).find(sh => Number(sh.show_id) === Number(ep.show_id))?.show_title || '';
+    return { id: Number(ep.episode_id), showId: Number(ep.show_id), title: ep.episode_title || `Episode ${ep.episode_id}`, show: showTitle, listens: e?.n || 0, listeners: e?.users.size || 0, done: e?.done || 0, completion: e?.n ? Math.round(e.done / e.n * 100) : 0, avgSec: e?.n ? Math.round(e.sec / e.n) : 0, avgFrac: e?.fracN ? Math.round(e.frac / e.fracN * 100) : null, last: e?.last || 0 };
+  }).sort((a, b) => b.listens - a.listens);
   const showRows = (state.myShows || []).map(sh => { const eps = episodeRows.filter(x => x.showId === Number(sh.show_id)); const lst = eps.reduce((a, x) => a + x.listens, 0), done = eps.reduce((a, x) => a + x.done, 0); return { id: Number(sh.show_id), title: sh.show_title, episodes: eps.length, listens: lst, completion: lst ? Math.round(done / lst * 100) : 0 }; }).sort((a, b) => b.listens - a.listens);
   const bestDayIdx = days.reduce((bi, v, i) => (v > days[bi] ? i : bi), 0);
   const bestDay = days[bestDayIdx] > 0 ? { value: days[bestDayIdx], label: new Date(now - (29 - bestDayIdx) * DAY).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) } : null;
   const topWeekday = weekday.reduce((a, b) => (b.value > a.value ? b : a), weekday[0]);
   const topDaypart = dayparts.reduce((a, b) => (b.value > a.value ? b : a), dayparts[0]);
-  return { qualified, total: qualified.length, unique: listeners.size, minutes: Math.round(seconds / 60), completionRate: qualified.length ? Math.round((completed / qualified.length) * 100) : 0, days, topEpisodes, topShows,
+  return {
+    qualified, total: qualified.length, unique: listeners.size, minutes: Math.round(seconds / 60), completionRate: qualified.length ? Math.round((completed / qualified.length) * 100) : 0, days, topEpisodes, topShows,
     completed, partial: qualified.length - completed, avgListenSec: qualified.length ? Math.round(seconds / qualified.length) : 0,
     avgPerListener: listeners.size ? Math.round(qualified.length / listeners.size * 10) / 10 : 0,
     returning, returningRate: perUser.size ? Math.round(returning / perUser.size * 100) : 0, bingers, bingeRate: perUser.size ? Math.round(bingers / perUser.size * 100) : 0,
-    last7, prev7, last30, prev30, weekday, dayparts, depth, episodeRows, showRows, bestDay, topWeekday, topDaypart, activeDays: days.filter(v => v > 0).length, noListenEpisodes: episodeRows.filter(x => x.listens === 0).length };
+    last7, prev7, last30, prev30, weekday, dayparts, depth, episodeRows, showRows, bestDay, topWeekday, topDaypart, activeDays: days.filter(v => v > 0).length, noListenEpisodes: episodeRows.filter(x => x.listens === 0).length
+  };
 }
 
 function podcastAnalyticsKpis(m) {
@@ -3821,13 +3922,13 @@ function podcastStudio() {
   document.querySelectorAll('[data-studio-show]').forEach(b => b.onclick = () => { const p = state.myShows.find(x => Number(x.show_id) === Number(b.dataset.studioShow)); if (!p) return; $('#editshowid').value = p.show_id; $('#editshowtitle').value = p.show_title || ''; $('#editshowcategory').value = p.category || ''; $('#editshowdesc').value = p.description || ''; $('#edit-show-cover-preview').innerHTML = p.cover_path && state.coverUrls[p.cover_path] ? `<img class="cover-img" src="${esc(state.coverUrls[p.cover_path])}" alt="">` : icon('mic'); $('#edit-show-dialog').showModal(); });
   document.querySelectorAll('[data-show-active]').forEach(b => b.onclick = () => action(async () => { const active = b.dataset.active === 'true'; check(await db.rpc('set_my_podcast_show_active', { p_show_id: Number(b.dataset.showActive), p_active: active })); await loadData(); render(); toast(active ? 'Podcast show restored' : 'Podcast show deactivated with its episodes'); }));
   $('#showform').onsubmit = e => { e.preventDefault(); action(async () => { const titleProblem = contentTitleProblem($('#showtitle')?.value, 'Show title', 140); if (titleProblem) throw Error(titleProblem); if (!(await checkShowTitleAvailability($('#showtitle')?.value))) throw Error('You already have a podcast show with this title. Choose a different title.'); let cover_path = null; const file = $('#showcover')?.files?.[0]; if (file) { if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) throw Error('Choose a JPEG, PNG or WebP cover.'); if (file.size > 5 * 1048576) throw Error('Podcast artwork must be under 5 MB.'); const ext = (file.name.split('.').pop() || 'jpg').toLowerCase(); cover_path = `${state.user.id}/podcasts/${crypto.randomUUID()}.${ext}`; check(await db.storage.from('covers').upload(cover_path, file, { upsert: false, contentType: file.type })); } try { check(await db.from('podcast_show').insert({ user_id: state.user.id, show_title: normalizedContentTitle(val('showtitle')), category: val('showcategory') || null, description: val('showdesc') || null, cover_path, is_active: true })); } catch (err) { if (cover_path) await db.storage.from('covers').remove([cover_path]); throw err; } await loadData(); state.podcastStudioView = 'shows'; render(); toast('Podcast show created'); }); };
-  $('#editshow').onsubmit = e => { e.preventDefault(); action(async () => { const show_id = Number(val('editshowid')); const existing = state.myShows.find(x => Number(x.show_id) === show_id); if (!existing) throw Error('Podcast show not found.'); const showTitle = val('editshowtitle'), titleProblem = contentTitleProblem(showTitle, 'Show title', 140); if (titleProblem) throw Error(titleProblem); if (!(await checkShowTitleAvailability(showTitle, show_id))) throw Error('You already have a podcast show with this title. Choose a different title.'); let cover_path = existing.cover_path || null, newPath = null; const file = $('#editshowcover')?.files?.[0]; try { if (file) { if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) throw Error('Choose a JPEG, PNG or WebP cover.'); if (file.size > 5 * 1048576) throw Error('Podcast artwork must be under 5 MB.'); const ext = (file.name.split('.').pop() || 'jpg').toLowerCase(); newPath = `${state.user.id}/podcasts/${crypto.randomUUID()}.${ext}`; check(await db.storage.from('covers').upload(newPath, file, { upsert: false, contentType: file.type })); cover_path = newPath; } check(await db.from('podcast_show').update({ show_title: normalizedContentTitle(showTitle), category: val('editshowcategory') || null, description: val('editshowdesc') || null, cover_path }).eq('show_id', show_id).eq('user_id', state.user.id)); if (newPath && existing.cover_path && existing.cover_path !== newPath) await db.storage.from('covers').remove([existing.cover_path]); } catch (err) { if (newPath) await db.storage.from('covers').remove([newPath]); throw err; } $('#edit-show-dialog').close(); await loadData(); state.podcastStudioView = 'shows'; render(); toast('Podcast show updated'); }); };
+  $('#editshow').onsubmit = e => { e.preventDefault(); action(() => swRun('Saving your show…', async () => { swStage('Checking your changes…', 'Validating the title'); const show_id = Number(val('editshowid')); const existing = state.myShows.find(x => Number(x.show_id) === show_id); if (!existing) throw Error('Podcast show not found.'); const showTitle = val('editshowtitle'), titleProblem = contentTitleProblem(showTitle, 'Show title', 140); if (titleProblem) throw Error(titleProblem); if (!(await checkShowTitleAvailability(showTitle, show_id))) throw Error('You already have a podcast show with this title. Choose a different title.'); let cover_path = existing.cover_path || null, newPath = null; const file = $('#editshowcover')?.files?.[0]; try { if (file) { if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) throw Error('Choose a JPEG, PNG or WebP cover.'); if (file.size > 5 * 1048576) throw Error('Podcast artwork must be under 5 MB.'); const ext = (file.name.split('.').pop() || 'jpg').toLowerCase(); newPath = `${state.user.id}/podcasts/${crypto.randomUUID()}.${ext}`; swStage('Uploading artwork…', `${file.name} (${swFmtBytes(file.size)})`); check(await db.storage.from('covers').upload(newPath, file, { upsert: false, contentType: file.type })); cover_path = newPath; } swStage('Saving show details…', 'Almost there'); check(await db.from('podcast_show').update({ show_title: normalizedContentTitle(showTitle), category: val('editshowcategory') || null, description: val('editshowdesc') || null, cover_path }).eq('show_id', show_id).eq('user_id', state.user.id)); if (newPath && existing.cover_path && existing.cover_path !== newPath) await db.storage.from('covers').remove([existing.cover_path]); } catch (err) { if (newPath) await db.storage.from('covers').remove([newPath]); throw err; } swStage('Updating your shows…', 'Your changes are saved'); await loadData(); $('#edit-show-dialog')?.close(); state.podcastStudioView = 'shows'; render(); toast('Podcast show updated'); })); };
   bindAudioDrop('ep');
   const epForm = $('#episodeform');
   const epWiz = bindWizard(epForm, { validate: (st) => { if (st === 1 && !val('epshow')) return 'Choose one of your shows first.'; if (st === 2) { const f = $('#ep-file').files?.[0]; if (!f) return 'Choose your audio file first.'; return audioProblem(f); } return ''; } });
   epForm.addEventListener('wizardstep', e => { if (e.detail !== 3) return; const f = $('#ep-file').files?.[0]; const sel = $('#epshow'); $('#ep-final').innerHTML = summaryHtml([['Show', sel?.selectedOptions?.[0]?.textContent], ['File', f?.name], ['Size', f ? `${(f.size / 1048576).toFixed(2)} MB` : '']]); });
   $('#eptitle')?.addEventListener('input', () => setFieldError($('#eptitle'), ''));
-  epForm.onsubmit = e => { e.preventDefault(); if (epWiz.step === 3 && !String($('#eptitle')?.value || '').trim()) { setFieldError($('#eptitle'), 'Give your episode a title before publishing.'); return; } action(async () => { if (epWiz.step !== 3) throw Error('Complete the upload steps first.'); const show_id = Number(val('epshow')); if (!state.myShows.some(p => Number(p.show_id) === show_id && p.is_active)) throw Error('Select an active show that you own.'); const file = $('#ep-file').files?.[0]; if (!file) throw Error('Choose an audio file.'); const bad = audioProblem(file); if (bad) throw Error(bad); const epTitleProblem = contentTitleProblem($('#eptitle')?.value, 'Episode title', 140); if (epTitleProblem) throw Error(epTitleProblem); const duration_seconds = await audioDuration(file); if (!(duration_seconds > 0)) throw Error('Audio metadata is unavailable.'); const safe = file.name.replace(/[^a-z0-9._-]/gi, '_').slice(-80); const path = `${state.user.id}/episodes/${crypto.randomUUID()}_${safe}`; const fin = epForm.querySelector('.wiz-finish'); setPublishing(fin, true, 'Publish episode'); try { check(await db.storage.from('podcast-audio').upload(path, file, { upsert: false, contentType: file.type || 'audio/mpeg' })); try { check(await db.from('podcast_episode').insert({ show_id, episode_title: normalizedContentTitle($('#eptitle')?.value), description: val('epdesc') || null, duration_seconds, audio_path: path, release_at: new Date().toISOString(), is_active: true })); } catch (err) { await db.storage.from('podcast-audio').remove([path]); throw err; } } finally { setPublishing(fin, false, 'Publish episode'); } await loadData(); state.podcastStudioView = 'shows'; render(); toast('Episode published'); }); };
+  epForm.onsubmit = e => { e.preventDefault(); if (epWiz.step === 3 && !String($('#eptitle')?.value || '').trim()) { setFieldError($('#eptitle'), 'Give your episode a title before publishing.'); return; } action(() => swRun('Publishing your episode…', async () => { if (epWiz.step !== 3) throw Error('Complete the upload steps first.'); swStage('Checking your episode…', 'Validating title and audio file'); const show_id = Number(val('epshow')); if (!state.myShows.some(p => Number(p.show_id) === show_id && p.is_active)) throw Error('Select an active show that you own.'); const file = $('#ep-file').files?.[0]; if (!file) throw Error('Choose an audio file.'); const bad = audioProblem(file); if (bad) throw Error(bad); const epTitleProblem = contentTitleProblem($('#eptitle')?.value, 'Episode title', 140); if (epTitleProblem) throw Error(epTitleProblem); const duration_seconds = await audioDuration(file); if (!(duration_seconds > 0)) throw Error('Audio metadata is unavailable.'); const safe = file.name.replace(/[^a-z0-9._-]/gi, '_').slice(-80); const path = `${state.user.id}/episodes/${crypto.randomUUID()}_${safe}`; const fin = epForm.querySelector('.wiz-finish'); setPublishing(fin, true, 'Publish episode'); try { swStage('Uploading your episode…', `${file.name} (${swFmtBytes(file.size)})`); check(await db.storage.from('podcast-audio').upload(path, file, { upsert: false, contentType: file.type || 'audio/mpeg' })); swStage('Saving episode details…', 'Almost there'); try { check(await db.from('podcast_episode').insert({ show_id, episode_title: normalizedContentTitle($('#eptitle')?.value), description: val('epdesc') || null, duration_seconds, audio_path: path, release_at: new Date().toISOString(), is_active: true })); } catch (err) { await db.storage.from('podcast-audio').remove([path]); throw err; } } finally { setPublishing(fin, false, 'Publish episode'); } swStage('Updating your show…', 'Your episode is published'); await loadData(); state.podcastStudioView = 'shows'; render(); toast('Episode published'); })); };
 }
 
 // ---------- Listening history ----------
@@ -3961,7 +4062,8 @@ function plans() {
     if (!chosenPlan) { toast('Choose a Premium plan first.', true); return; }
     const btn = $('#maya-start-checkout'); btn.disabled = true; btn.textContent = 'Creating checkout…';
     try {
-      const { data, error } = await db.functions.invoke('maya-create-checkout', { body: { plan_id: Number(chosenPlan.plan_id) } });
+      const returnOrigin = window.location.origin;
+      const { data, error } = await db.functions.invoke('maya-create-checkout', { body: { plan_id: Number(chosenPlan.plan_id), return_origin: returnOrigin } });
       if (error) { toast(`Could not start checkout: ${await edgeFunctionMessage(error)}`, true); return; }
       if (data?.error) { toast(`Could not start checkout: ${data.error}`, true); return; }
       if (!data?.checkout_url) { toast('The payment service did not return a checkout URL. Please try again.', true); return; }
@@ -4213,7 +4315,7 @@ function studio() {
   const wiz = bindWizard(songForm, { validate: (st) => { if (st === 1 && !document.querySelector('input[name="albumchoice"]:checked')) return 'Choose an album or create one first.'; if (st === 2) { const f = $('#song-file').files?.[0]; if (!f) return 'Choose your audio file first.'; return audioProblem(f); } if (st === 3) { const problem = contentTitleProblem($('#songtitle')?.value, 'Song title', 120); if (problem) return problem; if (!val('songgenre')) return 'Select a genre.'; } return ''; } });
   songForm.addEventListener('wizardstep', e => { if (e.detail !== 4) return; const f = $('#song-file').files?.[0]; const pick = document.querySelector('input[name="albumchoice"]:checked'); const alb = state.albums.find(a => String(a.album_id) === pick?.value); const g = state.genres.find(x => String(x.genre_id) === String(val('songgenre'))); $('#song-final').innerHTML = summaryHtml([['Title', normalizedContentTitle($('#songtitle')?.value)], ['Album', alb?.album_title], ['Genre', g?.genre_name], ['File', f?.name], ['Size', f ? `${(f.size / 1048576).toFixed(2)} MB` : '']]); });
   document.querySelectorAll('[data-album-select]').forEach(b => b.onclick = () => { state.selectedStudioAlbum = Number(b.dataset.albumSelect); state.artistStudioView = 'catalog'; render(); requestAnimationFrame(() => document.querySelector('.catalog-track-heading')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })); });
-  $('#albumcover').onchange = e => { const file = e.target.files[0]; const preview = $('#cover-preview'); if (file) { const url = URL.createObjectURL(file); preview.innerHTML = `<img src="${escapeHtml(url)}" alt="Selected album artwork">`; preview.querySelector('img').onload = () => URL.revokeObjectURL(url); } };
+  $('#albumcover').onchange = e => { const file = e.target.files[0]; const preview = $('#cover-preview'); if (file) { const url = URL.createObjectURL(file); preview.innerHTML = `<img src="${escapeHtml(url)}" alt="Selected album artwork">`; preview.querySelector('img').onload = () => URL.revokeObjectURL(url); const drop = $('#cover-drop'); drop?.classList.add('has-cover'); const t = drop?.querySelector('strong'); if (t) t.textContent = 'Change cover artwork'; const m = drop?.querySelector('small'); if (m) m.textContent = file.name; } };
   $('#songcover').onchange = e => { const file = e.target.files?.[0], preview = $('#song-cover-preview'); if (file && preview) { const url = URL.createObjectURL(file); preview.innerHTML = `<img src="${escapeHtml(url)}" alt="Selected song artwork">`; preview.querySelector('img').onload = () => URL.revokeObjectURL(url); } };
   const editSongDialog = $('#edit-song-modal'), editSongSearch = $('#owned-song-search'), editSongInput = $('#owned-song'), editSongTitle = $('#owned-song-title'), editSongSave = $('#edit-song-save');
   const chooseEditSong = (songId) => {
@@ -4227,10 +4329,10 @@ function studio() {
   document.querySelectorAll('[data-open-modal="edit-song-modal"]').forEach(button => { button.onclick = () => { dialogOpeners.set(editSongDialog, button); editSongSearch.value = ''; filterEditSongs(); if (button.dataset.editSongId) chooseEditSong(button.dataset.editSongId); else if (selectedRelease) { const first = catalogSongs[0]; if (first) chooseEditSong(first.song_id); } editSongDialog.showModal(); requestAnimationFrame(() => ($('#edit-song-picker')?.classList.contains('is-picked') ? editSongTitle : editSongSearch)?.focus()); }; });
   editSongDialog?.addEventListener('close', () => { editSongInput.value = ''; editSongSearch.value = ''; editSongTitle.value = ''; editSongTitle.disabled = true; editSongSave.disabled = true; { const box = $('#owned-song-lyrics'); if (box) { box.value = ''; box.disabled = true; box.dataset.loaded = ''; } } { const kf = $('#owned-song-karaoke-file'); if (kf) { kf.value = ''; syncKaraokePick(kf); kf.disabled = true; kf.dataset.loaded = ''; } const kw = $('#owned-song-karaoke-remove-wrap'); if (kw) kw.hidden = true; } $('#edit-song-selected').hidden = true; $('#edit-song-picker')?.classList.remove('is-picked'); document.querySelectorAll('[data-edit-song-option]').forEach(option => { option.hidden = false; option.classList.remove('selected'); option.setAttribute('aria-selected', 'false'); }); });
   $('#editsong').onsubmit = e => {
-    e.preventDefault(); action(async () => {
-      if (!val('owned-song')) throw Error('Choose a song to edit.'); const songId = Number(val('owned-song')); const title = val('owned-song-title'); const problem = contentTitleProblem(title, 'Song title', 120); if (problem) throw Error(problem); if (!(await checkSongTitleAvailability(title, songId))) throw Error('Another song in your catalog already uses this title.'); check(await db.from('song').update({ song_title: normalizedContentTitle(title), ...moodPatch('owned-song-moods') }).eq('song_id', songId)); const lyricsBox = $('#owned-song-lyrics'); let lyricsFailed = false; if (lyricsBox && lyricsBox.dataset.loaded === '1') { try { await saveSongLyrics(songId, lyricsBox.value); } catch (err) { console.warn('Lyrics not saved', err); lyricsFailed = true; } } let karaokeFailed = ''; const kFile = $('#owned-song-karaoke-file'); if (kFile && kFile.dataset.loaded === '1') { try { if ($('#owned-song-karaoke-remove')?.checked && !kFile.files?.[0]) await removeKaraokeTrack(songId); else if (kFile.files?.[0]) await saveKaraokeTrack(songId, kFile.files[0], Number(ownedSongs.find(x => Number(x.song_id) === songId)?.duration_seconds)); } catch (err) { console.warn('Instrumental not saved', err); karaokeFailed = humanErr(err); } }
-      await loadData(); state.artistStudioView = 'catalog'; render(); const problem2 = lyricsFailed ? 'Title updated, but the lyrics could not be saved.' : karaokeFailed ? `Song updated, but the instrumental was not saved. ${karaokeFailed}` : ''; toast(problem2 || 'Song details updated', Boolean(problem2));
-    });
+    e.preventDefault(); action(() => swRun('Saving your song…', async () => {
+      if (!val('owned-song')) throw Error('Choose a song to edit.'); swStage('Checking your changes…', 'Validating the title'); const songId = Number(val('owned-song')); const title = val('owned-song-title'); const problem = contentTitleProblem(title, 'Song title', 120); if (problem) throw Error(problem); if (!(await checkSongTitleAvailability(title, songId))) throw Error('Another song in your catalog already uses this title.'); swStage('Saving song details…', 'Title and mood'); check(await db.from('song').update({ song_title: normalizedContentTitle(title), ...moodPatch('owned-song-moods') }).eq('song_id', songId)); const lyricsBox = $('#owned-song-lyrics'); let lyricsFailed = false; if (lyricsBox && lyricsBox.dataset.loaded === '1') { swStage('Saving lyrics…', 'Almost there'); try { await saveSongLyrics(songId, lyricsBox.value); } catch (err) { console.warn('Lyrics not saved', err); lyricsFailed = true; } } let karaokeFailed = ''; const kFile = $('#owned-song-karaoke-file'); if (kFile && kFile.dataset.loaded === '1') { try { if ($('#owned-song-karaoke-remove')?.checked && !kFile.files?.[0]) { swStage('Removing instrumental…', 'Almost there'); await removeKaraokeTrack(songId); } else if (kFile.files?.[0]) { swStage('Uploading instrumental…', `${kFile.files[0].name} (${swFmtBytes(kFile.files[0].size)})`); await saveKaraokeTrack(songId, kFile.files[0], Number(ownedSongs.find(x => Number(x.song_id) === songId)?.duration_seconds)); } } catch (err) { console.warn('Instrumental not saved', err); karaokeFailed = humanErr(err); } }
+      swStage('Updating your library…', 'Your changes are saved'); await loadData(); state.artistStudioView = 'catalog'; render(); const problem2 = lyricsFailed ? 'Title updated, but the lyrics could not be saved.' : karaokeFailed ? `Song updated, but the instrumental was not saved. ${karaokeFailed}` : ''; toast(problem2 || 'Song details updated', Boolean(problem2));
+    }));
   };
   document.querySelectorAll('[data-album-active]').forEach(b => b.onclick = () => action(async () => {
     const active = b.dataset.active === 'true'; check(await db.rpc('set_my_album_active', { p_album_id: Number(b.dataset.albumActive), p_active: active }));
@@ -4265,22 +4367,22 @@ function studio() {
     });
   };
   $('#songform').onsubmit = e => {
-    e.preventDefault(); action(async () => {
-      if (wiz.step !== 4) throw Error('Complete the upload steps first.'); const file = $('#song-file').files?.[0]; if (!file) throw Error('Choose an audio file.'); const bad = audioProblem(file); if (bad) throw Error(bad); const album_id = Number(document.querySelector('input[name="albumchoice"]:checked')?.value); if (!validAlbums.some(a => a.album_id === album_id)) throw Error('Select an active album you own.'); const titleProblem = contentTitleProblem($('#songtitle')?.value, 'Song title', 120); if (titleProblem) throw Error(titleProblem); if (!val('songgenre')) throw Error('Select a genre.'); if (!(await checkSongTitleAvailability($('#songtitle')?.value))) throw Error('You already have a song with this title. Choose a different title.'); const duration_seconds = await audioDuration(file); if (!Number.isFinite(duration_seconds) || duration_seconds < 1) throw Error('Could not read the audio duration.'); const path = `${state.user.id}/songs/${crypto.randomUUID()}_${safeUploadFilename(file)}`;
-      const fin = songForm.querySelector('.wiz-finish'); setPublishing(fin, true, 'Publish song'); let cover_path = null, audioUploaded = false, coverUploaded = false, newSongId = null;
+    e.preventDefault(); action(() => swRun('Publishing your song…', async () => {
+      if (wiz.step !== 4) throw Error('Complete the upload steps first.'); swStage('Checking your track…', 'Validating title and audio file'); const file = $('#song-file').files?.[0]; if (!file) throw Error('Choose an audio file.'); const bad = audioProblem(file); if (bad) throw Error(bad); const album_id = Number(document.querySelector('input[name="albumchoice"]:checked')?.value); if (!validAlbums.some(a => a.album_id === album_id)) throw Error('Select an active album you own.'); const titleProblem = contentTitleProblem($('#songtitle')?.value, 'Song title', 120); if (titleProblem) throw Error(titleProblem); if (!val('songgenre')) throw Error('Select a genre.'); if (!(await checkSongTitleAvailability($('#songtitle')?.value))) throw Error('You already have a song with this title. Choose a different title.'); const duration_seconds = await audioDuration(file); if (!Number.isFinite(duration_seconds) || duration_seconds < 1) throw Error('Could not read the audio duration.'); const path = `${state.user.id}/songs/${crypto.randomUUID()}_${safeUploadFilename(file)}`;
+      const fin = songForm.querySelector('.wiz-finish'); setPublishing(fin, true, 'Publish song'); let cover_path = null, audioUploaded = false, coverUploaded = false, newSongId = null; swStage('Preparing upload…', file.name);
       try {
         const trackQuery = await db.from('song').select('track_number').eq('album_id', album_id).order('track_number', { ascending: false }).limit(1);
         if (trackQuery.error) throw trackQuery.error;
         const track_number = (Number(trackQuery.data?.[0]?.track_number) || 0) + 1;
-        check(await db.storage.from('song-audio').upload(path, file, { upsert: false, contentType: file.type || 'audio/mpeg' })); audioUploaded = true;
-        const cover = $('#songcover')?.files?.[0]; if (cover) { if (!['image/png', 'image/jpeg', 'image/webp'].includes(cover.type)) throw Error('Choose a JPEG, PNG or WebP song cover.'); if (cover.size > 5 * 1048576) throw Error('Song artwork must be under 5 MB.'); const ext = (cover.name.split('.').pop() || 'jpg').toLowerCase(); cover_path = `${state.user.id}/songs/${crypto.randomUUID()}.${ext}`; check(await db.storage.from('covers').upload(cover_path, cover, { upsert: false, contentType: cover.type })); coverUploaded = true; }
-        const inserted = check(await db.from('song').insert({ album_id, genre_id: Number(val('songgenre')), song_title: normalizedContentTitle($('#songtitle')?.value), description: val('songdesc') || null, cover_path, duration_seconds, track_number, audio_path: path, ...moodPatch('song-moods'), ...(albumScheduledAt(album_id) ? { is_active: false, held_for_release: true } : { is_active: true }) }).select('song_id').single());
+        swStage('Uploading your song…', `${file.name} (${swFmtBytes(file.size)})`); check(await db.storage.from('song-audio').upload(path, file, { upsert: false, contentType: file.type || 'audio/mpeg' })); audioUploaded = true;
+        const cover = $('#songcover')?.files?.[0]; if (cover) { if (!['image/png', 'image/jpeg', 'image/webp'].includes(cover.type)) throw Error('Choose a JPEG, PNG or WebP song cover.'); if (cover.size > 5 * 1048576) throw Error('Song artwork must be under 5 MB.'); const ext = (cover.name.split('.').pop() || 'jpg').toLowerCase(); cover_path = `${state.user.id}/songs/${crypto.randomUUID()}.${ext}`; swStage('Uploading artwork…', `${cover.name} (${swFmtBytes(cover.size)})`); check(await db.storage.from('covers').upload(cover_path, cover, { upsert: false, contentType: cover.type })); coverUploaded = true; }
+        swStage('Saving song details…', 'Almost there'); const inserted = check(await db.from('song').insert({ album_id, genre_id: Number(val('songgenre')), song_title: normalizedContentTitle($('#songtitle')?.value), description: val('songdesc') || null, cover_path, duration_seconds, track_number, audio_path: path, ...moodPatch('song-moods'), ...(albumScheduledAt(album_id) ? { is_active: false, held_for_release: true } : { is_active: true }) }).select('song_id').single());
         newSongId = inserted?.song_id ?? null;
       } catch (error) { if (audioUploaded) await db.storage.from('song-audio').remove([path]); if (coverUploaded && cover_path) await db.storage.from('covers').remove([cover_path]); throw error; } finally { setPublishing(fin, false, 'Publish song'); }
-      const lyricsText = $('#songlyrics')?.value || ''; if (newSongId && lyricsText.trim()) { try { await saveSongLyrics(newSongId, lyricsText); } catch (err) { console.warn('Lyrics not saved', err); toast('Song published, but the lyrics could not be saved. Add them from Edit song.', true); } }
-      let karaokeFailed = ''; const karaokeFile = $('#song-karaoke-file')?.files?.[0]; if (newSongId && karaokeFile) { try { await saveKaraokeTrack(newSongId, karaokeFile, duration_seconds); } catch (err) { console.warn('Instrumental not saved', err); karaokeFailed = humanErr(err); } }
-      await loadData(); state.artistStudioView = 'catalog'; render(); toast(karaokeFailed ? `Your track has been released, but the instrumental was not added. ${karaokeFailed}` : 'Your track has been released!', Boolean(karaokeFailed));
-    });
+      const lyricsText = $('#songlyrics')?.value || ''; if (newSongId && lyricsText.trim()) { swStage('Saving lyrics…', 'Almost there'); try { await saveSongLyrics(newSongId, lyricsText); } catch (err) { console.warn('Lyrics not saved', err); toast('Song published, but the lyrics could not be saved. Add them from Edit song.', true); } }
+      let karaokeFailed = ''; const karaokeFile = $('#song-karaoke-file')?.files?.[0]; if (newSongId && karaokeFile) { swStage('Uploading instrumental…', `${karaokeFile.name} (${swFmtBytes(karaokeFile.size)})`); try { await saveKaraokeTrack(newSongId, karaokeFile, duration_seconds); } catch (err) { console.warn('Instrumental not saved', err); karaokeFailed = humanErr(err); } }
+      swStage('Updating your library…', 'Your track is published'); await loadData(); state.artistStudioView = 'catalog'; render(); toast(karaokeFailed ? `Your track has been released, but the instrumental was not added. ${karaokeFailed}` : 'Your track has been released!', Boolean(karaokeFailed));
+    }));
   };
 }
 function admin() {
@@ -5478,11 +5580,14 @@ const crowdQueue = {
   error: '',
   channel: null,
   lastSyncVersion: 0,
+  clockBias: null,
   searchResults: [],
   searchTimer: null
 };
 
 function cleanupCrowdQueue() {
+  cqStopTimers();
+  crowdQueue.clockBias = null;
   if (crowdQueue.channel && db) {
     db.removeChannel(crowdQueue.channel);
     crowdQueue.channel = null;
@@ -5508,6 +5613,8 @@ async function loadMyActiveCrowdQueueSession() {
       crowdQueue.session = res.data;
       crowdQueue.lastSyncVersion = res.data.playback?.version || 0;
       setupCrowdQueueRealtime(res.data.session_id);
+      // A listener who joins (or reloads) mid-song starts in step with the host straight away.
+      if (!res.data.is_host && res.data.playback?.current_song_id) void cqApplyPlayback(res.data.playback, { initial: true });
       if (state.page === 'crowdqueue') render();
     } else {
       crowdQueue.session = null;
@@ -5515,6 +5622,60 @@ async function loadMyActiveCrowdQueueSession() {
   } catch (e) {
     console.warn('loadMyActiveCrowdQueueSession failed:', e);
   }
+}
+
+/* ====== CrowdQueue soft refresh ======
+   shell() rebuilds the ENTIRE app (top bar, library, page, sidebar, player bar) with innerHTML. CrowdQueue used to call
+   render() on every vote / queue / participant / playback event, and one vote fires several of them in a row, so the
+   whole screen was torn down and redrawn again and again: the blinking. Now events only patch the parts of the DOM that
+   actually changed (a vote changes one number), nothing is touched when nothing changed, and typed text, focus,
+   scroll position and open menus survive. */
+function cqHasOwnText(el) { return [...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim() !== ''); }
+function cqSyncAttrs(a, b) {
+  const live = (el, name) => el.tagName === 'DETAILS' && name === 'open'; // user-toggled, not in the markup
+  for (const at of [...a.attributes]) if (!b.hasAttribute(at.name) && !live(a, at.name)) a.removeAttribute(at.name);
+  for (const at of [...b.attributes]) if (a.getAttribute(at.name) !== at.value && !live(a, at.name)) a.setAttribute(at.name, at.value);
+}
+function cqMorph(a, b, depth = 0) {
+  if (a.outerHTML === b.outerHTML) return;
+  if (a.tagName !== b.tagName) { a.replaceWith(b); return; }
+  cqSyncAttrs(a, b);
+  const leaf = ['SELECT', 'TEXTAREA', 'INPUT', 'BUTTON', 'svg', 'SVG'].includes(a.tagName);
+  if (depth > 8 || leaf || a.children.length !== b.children.length || cqHasOwnText(a) || cqHasOwnText(b)) {
+    if (a.innerHTML !== b.innerHTML) a.innerHTML = b.innerHTML; return;
+  }
+  if (!a.children.length) { if (a.textContent !== b.textContent) a.textContent = b.textContent; return; }
+  // Snapshot both child lists first: cqMorph may replaceWith() a node, which moves it out of its parent
+  // and would shift every live index after it (that mismatch produced duplicated Pause/Next buttons).
+  const aKids = Array.from(a.children), bKids = Array.from(b.children);
+  for (let i = 0; i < aKids.length; i++) cqMorph(aKids[i], bKids[i], depth + 1);
+}
+function cqSoftRail() {
+  const rail = document.getElementById('context-rail'), box = rail?.querySelector(':scope > .cq-rail-container');
+  if (!rail || !box || !(crowdQueue.session && crowdQueue.session.status === 'active')) return;
+  const html = railHtml(); if (rail._cqSig === html) return;
+  const tpl = document.createElement('template'); tpl.innerHTML = html.trim();
+  const fresh = tpl.content.firstElementChild; if (!fresh || !fresh.classList.contains('cq-rail-container')) return;
+  cqMorph(box, fresh); rail._cqSig = html; bindRail();
+}
+let cqSoftTimer = 0;
+function cqSoftRender(immediate) {
+  clearTimeout(cqSoftTimer);
+  if (immediate) { cqSoftRenderNow(); return; }
+  cqSoftTimer = setTimeout(cqSoftRenderNow, 90); // events arrive in bursts: coalesce them into one patch
+}
+function cqSoftRenderNow() {
+  cqSoftTimer = 0;
+  if (!state.user) return;
+  const live = Boolean(crowdQueue.session && crowdQueue.session.status === 'active');
+  if (state.page === 'crowdqueue') {
+    const root = document.getElementById('cq-active-session');
+    if (!live || !root) { render(); return; } // lobby <-> room is a real page change: full render
+    const tpl = document.createElement('template'); tpl.innerHTML = crowdQueueActiveHtml().trim();
+    const fresh = tpl.content.firstElementChild;
+    if (fresh) { cqMorph(root, fresh); bindCrowdQueueEvents(); }
+  }
+  cqSoftRail();
 }
 
 function setupCrowdQueueRealtime(sessionId) {
@@ -5536,7 +5697,7 @@ function setupCrowdQueueRealtime(sessionId) {
       if (crowdQueue.session && row.order_mode) {
         crowdQueue.session.order_mode = row.order_mode;
         crowdQueue.session.session_name = row.session_name || crowdQueue.session.session_name;
-        if (state.page === 'crowdqueue') render();
+        cqSoftRender();
       }
     })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'crowdqueue_participants', filter: `session_id=eq.${sid}` }, () => {
@@ -5551,7 +5712,18 @@ function setupCrowdQueueRealtime(sessionId) {
     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'crowdqueue_playback', filter: `session_id=eq.${sid}` }, (payload) => {
       handleCrowdQueuePlaybackUpdate(payload.new);
     })
-    .subscribe();
+    .subscribe((status) => {
+      // If the realtime socket drops, reconnect and catch up on whatever was missed.
+      if (status === 'SUBSCRIBED') {
+        if (crowdQueue._wasDown) { crowdQueue._wasDown = false; void cqResync({ quiet: true }); }
+      } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+        crowdQueue._wasDown = true;
+        cqSync.state = 'reconnecting'; cqSoftRender();
+        clearTimeout(crowdQueue._retryTimer);
+        crowdQueue._retryTimer = setTimeout(() => { if (crowdQueue.session && crowdQueue.session.session_id === sid) setupCrowdQueueRealtime(sid); }, 3000);
+      }
+    });
+  cqStartTimers(sid);
 }
 
 async function refreshCrowdQueueSession(sessionId) {
@@ -5560,56 +5732,187 @@ async function refreshCrowdQueueSession(sessionId) {
     const res = await db.rpc('sw_cq_get_session', { p_session_id: Number(sessionId) });
     if (!res.error && res.data) {
       crowdQueue.session = res.data;
-      if (state.page === 'crowdqueue') render();
+      cqSoftRender();
     }
   } catch (e) {
     console.warn('Failed to refresh CrowdQueue session:', e);
   }
 }
 
-function handleCrowdQueuePlaybackUpdate(pb) {
+/* ====== CrowdQueue playback sync (listeners follow the host) ======
+   - The host re-broadcasts its position every few seconds (heartbeat), so drift is corrected continuously.
+   - Listeners estimate how old each update is (updated_at minus a measured clock bias) and add that elapsed time.
+   - A slow poll + visibility/online hooks are a safety net if the realtime socket drops.
+   - Only the newest update is ever applied, so rapid host skips cannot make a listener play an old song. */
+const cqSync = { state: 'idle', seq: 0, hb: 0, poll: 0, tick: 0, installed: false };
+
+function cqExpectedPosition(pb, receivedAt) {
+  const base = Number(pb.position_seconds) || 0;
+  if (!pb.is_playing) return base;
+  let elapsed = 0;
+  const ts = Date.parse(pb.updated_at || pb.position_updated_at || '');
+  if (Number.isFinite(ts)) {
+    const age = (receivedAt || Date.now()) - ts;
+    // The smallest observed age ~ clock difference + network delay; anything above it is real elapsed time.
+    if (crowdQueue.clockBias === null || age < crowdQueue.clockBias) crowdQueue.clockBias = age;
+    elapsed = Math.min(20, Math.max(0, (Date.now() - ts - crowdQueue.clockBias) / 1000));
+  }
+  return base + elapsed;
+}
+
+async function cqApplyPlayback(pb, opts = {}) {
+  const s = crowdQueue.session;
+  if (!pb || !s || s.is_host) return;
+  const mine = ++cqSync.seq;
+  const receivedAt = Date.now();
+  const songId = pb.current_song_id ? Number(pb.current_song_id) : null;
+  const audio = () => document.getElementById('sw-audio');
+  const curSong = () => (state.player?.kind === 'song' ? Number(state.player.id) : null);
+  const tryPlay = async (a) => {
+    try { await a.play(); cqSync.state = 'synced'; }
+    catch (e) { cqSync.state = (e && e.name === 'NotAllowedError') ? 'blocked' : 'out'; }
+  };
+  try {
+    if (!songId) { const a = audio(); if (a && !a.paused) a.pause(); cqSync.state = 'synced'; cqSoftRender(); return; }
+    if (curSong() !== songId) {
+      cqSync.state = 'syncing'; cqSoftRender();
+      await playSong(songId, null, { quiet: true });
+      if (mine !== cqSync.seq) return; // a newer update arrived while this song was loading
+    }
+    const a = audio(); if (!a) return;
+    const target = cqExpectedPosition(pb, receivedAt) + (Date.now() - receivedAt) / 1000 * (pb.is_playing ? 1 : 0);
+    const drift = a.currentTime - target;
+    if (pb.is_playing) {
+      if (Math.abs(drift) > (opts.initial || curSong() !== songId ? 0.4 : 1.5) && Number.isFinite(target)) a.currentTime = Math.max(0, target);
+      if (a.paused) await tryPlay(a); else cqSync.state = 'synced';
+    } else {
+      if (!a.paused) a.pause();
+      if (Math.abs(drift) > 0.5) a.currentTime = Math.max(0, Number(pb.position_seconds) || 0);
+      cqSync.state = 'synced';
+    }
+  } catch (e) {
+    console.warn('CrowdQueue sync failed', e);
+    if (mine === cqSync.seq) cqSync.state = 'out';
+  }
+  cqSoftRender();
+}
+
+function handleCrowdQueuePlaybackUpdate(pb, opts = {}) {
   if (!pb || !crowdQueue.session) return;
   const version = Number(pb.version || 0);
-  if (version <= crowdQueue.lastSyncVersion) return;
+  if (version < crowdQueue.lastSyncVersion) return;
+  if (version === crowdQueue.lastSyncVersion && !opts.poll) return;
+  const isNew = version > crowdQueue.lastSyncVersion;
   crowdQueue.lastSyncVersion = version;
   crowdQueue.session.playback = pb;
 
   // Host drives playback; don't let their own broadcast interrupt them
   if (crowdQueue.session.is_host) {
-    if (state.page === 'crowdqueue') render();
+    if (isNew) cqSoftRender();
     return;
   }
+  void cqApplyPlayback(pb, opts);
+}
 
-  // Member playback sync
-  const songId = pb.current_song_id ? Number(pb.current_song_id) : null;
-  const audio = document.getElementById('sw-audio');
-  const curSong = state.player?.kind === 'song' ? Number(state.player.id) : null;
+// Pull the latest state from the server (used by the poll, tab-visible, back-online and the "Sync" button).
+async function cqResync(opts = {}) {
+  const s = crowdQueue.session;
+  if (!db || !s) return;
+  try {
+    const res = await db.rpc('sw_cq_get_session', { p_session_id: Number(s.session_id) });
+    if (res.error || !res.data) return;
+    const prevPb = crowdQueue.session?.playback;
+    crowdQueue.session = res.data;
+    if (!res.data.is_host) {
+      if (opts.force) cqSync.state = 'syncing';
+      const pb = res.data.playback || prevPb;
+      if (pb) {
+        if (opts.force) { crowdQueue.lastSyncVersion = Math.min(crowdQueue.lastSyncVersion, Number(pb.version || 0) - 1); }
+        handleCrowdQueuePlaybackUpdate(pb, { poll: true });
+      }
+    }
+    cqSoftRender();
+  } catch (e) { console.warn('CrowdQueue resync failed', e); }
+}
 
-  if (songId && curSong !== songId) {
-    playAction(async () => {
-      if (typeof playSong === 'function') {
-        await playSong(songId, null, { quiet: true });
-      }
-      const a = document.getElementById('sw-audio');
-      if (a && pb.position_seconds > 0) {
-        a.currentTime = Number(pb.position_seconds);
-      }
-      if (pb.is_playing === false && a) {
-        a.pause();
-      }
+// Host heartbeat: publish the real position so listeners can correct drift.
+async function cqHostHeartbeat() {
+  const s = crowdQueue.session;
+  if (!s || !s.is_host || cqNextBusy) return;
+  const pb = s.playback || {};
+  const a = document.getElementById('sw-audio');
+  if (!a || a.paused || !pb.current_song_id || !pb.is_playing) return;
+  if (!(state.player?.kind === 'song' && Number(state.player.id) === Number(pb.current_song_id))) return;
+  try {
+    const res = await db.rpc('sw_cq_update_playback', {
+      p_session_id: Number(s.session_id),
+      p_queue_item_id: pb.current_queue_item_id ? Number(pb.current_queue_item_id) : null,
+      p_song_id: Number(pb.current_song_id),
+      p_is_playing: true,
+      p_position_seconds: a.currentTime,
+      p_version: pb.version ? Number(pb.version) : null
     });
-  } else if (audio && curSong === songId) {
-    if (pb.is_playing && audio.paused) {
-      audio.play().catch(() => { });
-    } else if (!pb.is_playing && !audio.paused) {
-      audio.pause();
-    }
-    const diff = Math.abs(audio.currentTime - Number(pb.position_seconds || 0));
-    if (diff > 3) {
-      audio.currentTime = Number(pb.position_seconds || 0);
-    }
+    if (!res.error && res.data) { s.playback = res.data; crowdQueue.lastSyncVersion = Math.max(Number(crowdQueue.lastSyncVersion) || 0, Number(res.data.version) || 0); }
+  } catch (e) { /* the next heartbeat will try again */ }
+}
+
+function cqUpdateProgress() {
+  const s = crowdQueue.session; if (!s) return;
+  const bars = document.querySelectorAll('.cq-np-progress'); if (!bars.length) return;
+  const pb = s.playback || {};
+  const song = pb.current_song_id ? songById(pb.current_song_id) : null;
+  const a = document.getElementById('sw-audio');
+  const same = a && state.player?.kind === 'song' && Number(state.player.id) === Number(pb.current_song_id);
+  const dur = (same && Number.isFinite(a.duration) && a.duration > 0) ? a.duration : Number(song?.duration_seconds) || 0;
+  const pos = same ? a.currentTime : cqExpectedPosition(pb);
+  const pct = dur > 0 ? Math.max(0, Math.min(100, (pos / dur) * 100)) : 0;
+  bars.forEach((bar) => {
+    const fill = bar.querySelector('i'); if (fill) fill.style.width = pct + '%';
+    const e = bar.querySelector('[data-cq-elapsed]'); if (e) e.textContent = nice(pos);
+    const t = bar.querySelector('[data-cq-total]'); if (t) t.textContent = dur > 0 ? nice(dur) : '--:--';
+  });
+}
+
+function cqStartTimers(sid) {
+  cqStopTimers();
+  cqSync.hb = setInterval(() => { void cqHostHeartbeat(); }, 8000);
+  cqSync.poll = setInterval(() => { if (!document.hidden) void cqResync({ quiet: true }); }, 7000);
+  cqSync.tick = setInterval(cqUpdateProgress, 500);
+  if (!cqSync.installed) {
+    cqSync.installed = true;
+    document.addEventListener('visibilitychange', () => { if (!document.hidden && crowdQueue.session) void cqResync({ quiet: true }); });
+    window.addEventListener('online', () => { if (crowdQueue.session) void cqResync({ force: true }); });
+    // One delegated handler covers the "Sync" chip on the page and in the side panel.
+    document.addEventListener('click', (ev) => {
+      const b = ev.target.closest && ev.target.closest('[data-cq-resync]');
+      if (b) { ev.preventDefault(); void cqResync({ force: true }); }
+    });
   }
-  if (state.page === 'crowdqueue') render();
+}
+function cqStopTimers() {
+  clearInterval(cqSync.hb); clearInterval(cqSync.poll); clearInterval(cqSync.tick);
+  cqSync.hb = cqSync.poll = cqSync.tick = 0; cqSync.state = 'idle'; cqSync.seq++;
+  clearTimeout(crowdQueue._retryTimer);
+}
+
+// Small status chip shown on the page and in the side panel.
+function cqSyncChipHtml(isHost) {
+  if (isHost) return '<span class="cq-sync-chip is-host" role="status"><b></b>Hosting · everyone follows you</span>';
+  const st = cqSync.state;
+  if (st === 'blocked') return '<button type="button" class="cq-sync-chip is-warn" data-cq-resync="1"><b></b>Tap to start audio</button>';
+  if (st === 'out') return '<button type="button" class="cq-sync-chip is-warn" data-cq-resync="1"><b></b>Out of sync · Resync</button>';
+  if (st === 'syncing') return '<span class="cq-sync-chip is-busy" role="status"><b></b>Syncing…</span>';
+  if (st === 'reconnecting') return '<span class="cq-sync-chip is-busy" role="status"><b></b>Reconnecting…</span>';
+  return '<button type="button" class="cq-sync-chip is-ok" data-cq-resync="1" title="Click to re-sync with the host"><b></b>In sync with host</button>';
+}
+function cqProgressHtml() {
+  return '<div class="cq-np-progress" aria-hidden="true"><span data-cq-elapsed>0:00</span><div class="cq-np-track"><i></i></div><span data-cq-total>--:--</span></div>';
+}
+function cqAvatarsHtml(participants) {
+  const list = (participants || []).slice(0, 6);
+  const more = (participants || []).length - list.length;
+  const initial = (p) => esc(String(p.display_name || p.username || 'L').trim().charAt(0).toUpperCase() || 'L');
+  return `<div class="cq-avatars" aria-label="Listeners">${list.map(p => `<span class="cq-avatar ${p.role === 'host' ? 'is-host' : ''}" title="${esc(p.display_name || p.username || 'Listener')}${p.role === 'host' ? ' (Host)' : ''}">${initial(p)}</span>`).join('')}${more > 0 ? `<span class="cq-avatar more">+${more}</span>` : ''}</div>`;
 }
 
 function crowdQueueUpgradePromptHtml() {
@@ -5787,7 +6090,7 @@ function crowdQueueActiveHtml() {
         <div class="cq-session-meta">
           <span>Host: <strong>${esc(s.host?.display_name || 'Host')}</strong></span>
           <span>·</span>
-          <span>${participants.length} / ${s.participant_limit} listeners</span>
+          <span class="cq-listeners">${cqAvatarsHtml(participants)}${participants.length} / ${s.participant_limit} listeners</span>
           <span>·</span>
           <span>Order: <strong>${s.order_mode === 'voted' ? 'Top Voted' : 'Chronological'}</strong></span>
           <button type="button" class="cq-code-pill cq-invite-pill" id="cq-copy-invite-link" title="Copy direct invite link" aria-label="Copy direct invite link">
@@ -5818,6 +6121,7 @@ function crowdQueueActiveHtml() {
         <div class="cq-np-details">
           <strong>${esc(currentSong.song_title || currentSong.title || 'Current Track')}</strong>
           <small class="muted">${esc(currentSong.artist_name || currentSong.artist || 'Artist')} ${pb.is_playing ? '· Playing' : '· Paused'}</small>
+          ${cqProgressHtml()}
         </div>
         ${isHost ? `
           <div class="cq-np-controls">
@@ -5826,7 +6130,7 @@ function crowdQueueActiveHtml() {
           </div>
         ` : `
           <div class="cq-np-controls">
-            <span class="muted" style="font-size:12px">${icon('volume')} Synced to host</span>
+            ${cqSyncChipHtml(false)}
           </div>
         `}
       ` : `
@@ -6040,7 +6344,7 @@ async function voteQueueItem(queueItemId) {
   // Optimistic UI update
   item.my_vote = newVote;
   item.score = (item.score || 0) + diff;
-  if (state.page === 'crowdqueue') render();
+  cqSoftRender(true);
 
   try {
     const res = await db.rpc('sw_cq_vote', {
@@ -6059,7 +6363,7 @@ async function voteQueueItem(queueItemId) {
     item.my_vote = currentVote;
     item.score = (item.score || 0) - diff;
     toast(humanErr(e), true);
-    if (state.page === 'crowdqueue') render();
+    cqSoftRender(true);
   }
 }
 
@@ -6089,17 +6393,45 @@ async function reorderCrowdQueueItem(queueItemId, delta) {
   }
 }
 
-async function hostPlayNextInCrowdQueue() {
+let cqNextBusy = false;
+async function hostPlayNextInCrowdQueue(opts = {}) {
   if (!crowdQueue.session || !crowdQueue.session.is_host) return;
-  const s = crowdQueue.session;
-  const queue = Array.isArray(s.queue) ? s.queue : [];
-  const upcoming = queue.filter(q => q.status === 'upcoming');
-  if (!upcoming.length) {
-    toast('No upcoming songs in the queue.');
-    return;
+  if (cqNextBusy) return; // rapid clicks must not start overlapping skips
+  cqNextBusy = true;
+  document.querySelectorAll('#cq-btn-skip-next, #cq-rail-np-next').forEach(b => { b.disabled = true; });
+  try {
+    // Always decide from the freshest queue so a quick second click never replays the same song.
+    await refreshCrowdQueueSession(crowdQueue.session.session_id);
+    const s = crowdQueue.session;
+    if (!s || !s.is_host) return;
+    const queue = Array.isArray(s.queue) ? s.queue : [];
+    const upcoming = queue.filter(q => q.status === 'upcoming');
+    if (!upcoming.length) {
+      if (opts.auto) await hostAnnounceStopped(); else toast('No upcoming songs in the queue.');
+      return;
+    }
+    await hostPlayQueueItem(upcoming[0]);
+  } finally {
+    cqNextBusy = false;
+    document.querySelectorAll('#cq-btn-skip-next, #cq-rail-np-next').forEach(b => { b.disabled = false; });
   }
-  const nextItem = upcoming[0];
-  await hostPlayQueueItem(nextItem);
+}
+
+// The queue ran out: tell listeners playback stopped so nobody is left looping or hearing silence.
+async function hostAnnounceStopped() {
+  const s = crowdQueue.session; if (!s || !s.is_host) return;
+  const pb = s.playback || {};
+  try {
+    const res = await db.rpc('sw_cq_update_playback', {
+      p_session_id: Number(s.session_id),
+      p_queue_item_id: pb.current_queue_item_id ? Number(pb.current_queue_item_id) : null,
+      p_song_id: pb.current_song_id ? Number(pb.current_song_id) : null,
+      p_is_playing: false, p_position_seconds: 0, p_version: null
+    });
+    if (!res.error && res.data) { s.playback = res.data; crowdQueue.lastSyncVersion = Math.max(Number(crowdQueue.lastSyncVersion) || 0, Number(res.data.version) || 0); }
+    toast('The queue is finished. Add more songs to keep listening.');
+    cqSoftRender(true);
+  } catch (e) { console.warn('Could not announce the end of the queue', e); }
 }
 
 async function hostPlayQueueItem(item) {
@@ -6109,24 +6441,39 @@ async function hostPlayQueueItem(item) {
   const songId = Number(item.song_id);
 
   try {
-    if (typeof playSong === 'function') {
+    const already = state.player?.kind === 'song' && Number(state.player.id) === songId;
+    if (already) {
+      // playSong() on the song that is already loaded would toggle pause, so restart it instead.
+      const a0 = document.getElementById('sw-audio');
+      if (a0) { a0.currentTime = 0; await a0.play().catch(() => { }); }
+    } else if (typeof playSong === 'function') {
       await playSong(songId);
     }
     const audio = document.getElementById('sw-audio');
     const pos = audio ? audio.currentTime : 0;
-    const res = await db.rpc('sw_cq_update_playback', {
+    const send = (version) => db.rpc('sw_cq_update_playback', {
       p_session_id: Number(s.session_id),
       p_queue_item_id: qid,
       p_song_id: songId,
       p_is_playing: true,
       p_position_seconds: pos,
-      p_version: s.playback?.version ? Number(s.playback.version) : null
+      p_version: version
     });
-    if (!res.error && res.data) {
-      s.playback = res.data;
-      crowdQueue.lastSyncVersion = res.data.version;
+    let res = await send(s.playback?.version ? Number(s.playback.version) : null);
+    if (res.error) {
+      // A stale playback version is the usual cause: re-sync once without it instead of failing silently.
+      console.warn('CrowdQueue playback update failed, retrying', res.error);
+      res = await send(null);
     }
-    void refreshCrowdQueueSession(s.session_id);
+    if (res.error) throw res.error;
+    if (res.data) {
+      s.playback = res.data;
+      crowdQueue.lastSyncVersion = Math.max(Number(crowdQueue.lastSyncVersion) || 0, Number(res.data.version) || 0);
+    }
+    // Show the change immediately: the song that just started leaves the upcoming list.
+    (s.queue || []).forEach(q => { if (Number(q.queue_item_id) === qid) q.status = 'playing'; });
+    cqSoftRender(true);
+    await refreshCrowdQueueSession(s.session_id);
   } catch (e) {
     toast(humanErr(e), true);
   }
@@ -6157,7 +6504,7 @@ async function hostTogglePlay() {
       s.playback = res.data;
       crowdQueue.lastSyncVersion = res.data.version;
     }
-    if (state.page === 'crowdqueue') render();
+    cqSoftRender();
   } catch (e) {
     toast(humanErr(e), true);
   }
@@ -6248,13 +6595,13 @@ function bindCrowdQueueEvents() {
   }
 
   // Leave and End buttons
-  document.getElementById('cq-btn-leave-session')?.addEventListener('click', () => void leaveCrowdQueueSession());
-  document.getElementById('cq-btn-end-session')?.addEventListener('click', () => void closeCrowdQueueSession());
+  { const b = document.getElementById('cq-btn-leave-session'); if (b) b.onclick = () => void leaveCrowdQueueSession(); }
+  { const b = document.getElementById('cq-btn-end-session'); if (b) b.onclick = () => void closeCrowdQueueSession(); }
 
   // Host playback controls
-  document.getElementById('cq-btn-toggle-play')?.addEventListener('click', () => void hostTogglePlay());
-  document.getElementById('cq-btn-skip-next')?.addEventListener('click', () => void hostPlayNextInCrowdQueue());
-  document.getElementById('cq-btn-start-queue')?.addEventListener('click', () => void hostPlayNextInCrowdQueue());
+  { const b = document.getElementById('cq-btn-toggle-play'); if (b) b.onclick = () => void hostTogglePlay(); }
+  { const b = document.getElementById('cq-btn-skip-next'); if (b) b.onclick = () => void hostPlayNextInCrowdQueue(); }
+  { const b = document.getElementById('cq-btn-start-queue'); if (b) b.onclick = () => void hostPlayNextInCrowdQueue(); }
 
   // Queue item actions (voting, remove, reorder)
   const queueList = document.getElementById('cq-queue-list');
@@ -6682,6 +7029,7 @@ function crowdQueueRailHtml() {
             </div>
           ` : ''}
         </div>
+        <div class="cq-rail-np-sync">${cqProgressHtml()}${cqSyncChipHtml(isHost)}</div>
       </div>
     ` : ''}
 
@@ -6821,7 +7169,7 @@ function updateCrowdQueueEntries() {
 function refreshRail() {
   updateCrowdQueueEntries();
   const el = document.getElementById('context-rail'); if (!el) return;
-  el.innerHTML = railHtml(); bindRail();
+  { const html = railHtml(); el.innerHTML = html; el._cqSig = html; } bindRail();
   const activeArtist = state.player?.kind === 'song' ? songById(state.player.id)?.album?.artist : null;
   if (activeArtist) { const a = state.artists.find(x => Number(x.artist_id) === Number(activeArtist.artist_id)); if (a) { updateArtistArtwork(a); if (!artistAvatarUrl(a)) void ensureArtistPhoto(a); } }
   $('#sw-queue')?.classList.toggle('active', state.railTab === 'queue' && !prefs.railHidden);
@@ -6885,10 +7233,10 @@ document.addEventListener('click', e => {
 });
 function bindRail() {
   const rail = document.getElementById('context-rail'); if (!rail) return;
-  rail.querySelector('#close-rail')?.addEventListener('click', () => { toggleRail(true); $('#sw-view')?.classList.remove('active'); });
+  { const b = rail.querySelector('#close-rail'); if (b) b.onclick = () => { toggleRail(true); $('#sw-view')?.classList.remove('active'); }; }
 
   // CrowdQueue Sidebar bindings
-  rail.querySelector('#cq-rail-copy-link')?.addEventListener('click', () => void copyCrowdQueueInviteLink());
+  { const b = rail.querySelector('#cq-rail-copy-link'); if (b) b.onclick = () => void copyCrowdQueueInviteLink(); }
 
   const modeSel = rail.querySelector('#cq-rail-mode-switch');
   if (modeSel && crowdQueue.session?.is_host) {
@@ -6902,8 +7250,7 @@ function bindRail() {
         if (res.error) throw res.error;
         crowdQueue.session.order_mode = mode;
         toast(`Queue order set to ${mode === 'voted' ? 'Top Voted' : 'Chronological'}`);
-        refreshRail();
-        if (state.page === 'crowdqueue') render();
+        cqSoftRender(true);
       } catch (e) {
         toast(humanErr(e), true);
       }
@@ -7000,12 +7347,9 @@ function bindRail() {
     }
   };
 
-  rail.querySelector('#cq-rail-np-play')?.addEventListener('click', () => void hostTogglePlay());
-  rail.querySelector('#cq-rail-np-next')?.addEventListener('click', () => void hostPlayNextInCrowdQueue());
-  rail.querySelector('#cq-rail-leave-btn')?.addEventListener('click', () => {
-    if (crowdQueue.session?.is_host) void closeCrowdQueueSession();
-    else void leaveCrowdQueueSession();
-  });
+  { const b = rail.querySelector('#cq-rail-np-play'); if (b) b.onclick = () => void hostTogglePlay(); }
+  { const b = rail.querySelector('#cq-rail-np-next'); if (b) b.onclick = () => void hostPlayNextInCrowdQueue(); }
+  { const b = rail.querySelector('#cq-rail-leave-btn'); if (b) b.onclick = () => { if (crowdQueue.session?.is_host) void closeCrowdQueueSession(); else void leaveCrowdQueueSession(); }; }
   rail.querySelectorAll('[data-rail-tab]').forEach((b) => b.onclick = () => { const next = b.dataset.railTab; state.railTab = next === state.railTab ? 'now' : next; refreshRail(); if (state.railTab === 'lyrics' && state.player?.kind === 'song') { const sid = String(state.player.id); if (state.lyricsCache[sid] === undefined) { db.from('song_lyrics').select('lyrics').eq('song_id', state.player.id).maybeSingle().then(r => { state.lyricsCache[sid] = r.error ? '' : (r.data?.lyrics || ''); if (state.railTab === 'lyrics') refreshRail(); }); } } });
   rail.querySelectorAll('[data-queue-jump]').forEach((b) => b.onclick = () => { const p = state.player; if (!p) return; const idx = Number(b.dataset.queueJump); playAction(() => playSong(p.order[idx], p.queue, { order: p.order, pos: idx })); });
   bindFavoriteButtons(new Set(state.favorites.map((f) => String(f.artist_id))));
@@ -8322,6 +8666,12 @@ document.addEventListener('click', (e) => {
   chip.setAttribute('aria-pressed', String(turningOn)); chip.classList.toggle('on', turningOn);
 });
 
+// Small coloured pills showing a song's moods (rows + player). Clicking one opens that mood's page.
+function moodPillsHtml(song, max = 2) {
+  if (moodColumn !== 'yes') return '';
+  const list = songMoods(song).map(moodByKey).filter(Boolean).slice(0, max); if (!list.length) return '';
+  return `<span class="mood-pills">${list.map((m) => `<button type="button" class="mood-pill" data-open-mood="${m.n}" style="background:${moodGradient(m)}" title="More ${esc(m.label)} songs" aria-label="Mood: ${esc(m.label)}">${esc(m.label)}</button>`).join('')}</span>`;
+}
 // ---- Listener side ----
 const moodSongs = (m) => (state.songs || []).filter((s) => s.is_active !== false && s.album?.is_active !== false && s.album?.artist?.is_active !== false && songMoods(s).includes(m.key));
 function moodTilesHtml() {
