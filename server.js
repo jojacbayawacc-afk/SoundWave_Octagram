@@ -6,7 +6,7 @@ http.createServer((req, res) => {
   let p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
   if (p === '/') p = '/index.html';
   const file = path.normalize(path.join(ROOT, p));
-  if (!file.startsWith(ROOT) || /(^|[\\/])(sql|node_modules|\.git)([\\/]|$)/.test(path.relative(ROOT, file))) { res.writeHead(403); return res.end('Forbidden'); }
+  if (!file.startsWith(ROOT) || /(^|[\\/])(sql|supabase|node_modules|\.git)([\\/]|$)/.test(path.relative(ROOT, file))) { res.writeHead(403); return res.end('Forbidden'); }
   fs.readFile(file, (err, buf) => {
     if (err) { res.writeHead(404, { 'Content-Type': 'text/plain' }); return res.end('Not found'); }
     res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store' });
